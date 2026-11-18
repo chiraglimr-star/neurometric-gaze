@@ -1,1580 +1,929 @@
-"""
-THE NEUROMETRIC GAZE 3.0
-Advanced Computational Narrative Medicine Research Prototype
+from pathlib import Path
+import py_compile, zipfile, textwrap, os, json
 
-Important:
-- Exploratory research software, not a diagnostic or clinical decision tool.
-- Lexical matches are not evidence of a patient's psychological state.
-- ML performance is reported only when independently labelled data is supplied.
-- Do not upload identifiable or confidential patient data without appropriate
-  consent, ethics approval, security controls, and institutional authorization.
+base = Path("/mnt/data/neurometric_gaze_daic")
+base.mkdir(parents=True, exist_ok=True)
+
+app = r'''"""
+THE NEUROMETRIC GAZE — Clinical Communication Research Edition
+
+Dataset target:
+  DAIC-WOZ (Distress Analysis Interview Corpus — Wizard-of-Oz subset)
+
+Scientific scope:
+  - DAIC-WOZ is access-controlled. Apply to USC ICT; do not redistribute it.
+  - This app does not contain or fabricate DAIC-WOZ participant records.
+  - Upload the officially obtained DAIC-WOZ archive as a ZIP.
+  - The official train split is used for model development; official development
+    split is kept separate for a held-out evaluation.
+  - The official test split does not include PHQ-8 labels in the standard package,
+    so it cannot be scored unless a legitimately obtained label file is available.
+  - PHQ-8 is a self-report symptom questionnaire, not a clinical diagnosis.
+  - Text-based emotion lexicon counts describe word associations, not a person's
+    actual emotional state.
+
+Expected generic CSV alternative:
+  participant_id, text, PHQ8_Binary, PHQ8_Score
+Optional: speaker, session_id, split
+
+NRC Emotion Lexicon:
+  Upload the official NRC Word-Emotion Association Lexicon text file.
+  Expected tab-separated columns: word, emotion, association (0/1).
+  NRC lexicon is free for research use subject to NRC terms; check current terms.
 """
 
 from __future__ import annotations
 
 import io
-import json
 import re
+import json
+import math
+import zipfile
 import hashlib
-import platform
-import tempfile
-from pathlib import Path
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from collections import Counter
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
+from sklearn.pipeline import Pipeline
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
-from sklearn.pipeline import Pipeline
-from sklearn.model_selection import train_test_split, StratifiedKFold, cross_validate
+from sklearn.model_selection import StratifiedGroupKFold, GridSearchCV
 from sklearn.metrics import (
-    accuracy_score,
-    precision_score,
-    recall_score,
-    f1_score,
-    cohen_kappa_score,
-    confusion_matrix,
-    classification_report,
+    accuracy_score, balanced_accuracy_score, f1_score,
+    precision_recall_fscore_support, confusion_matrix,
+    roc_auc_score, brier_score_loss, classification_report
 )
+from sklearn.calibration import calibration_curve
+from sklearn.utils import check_random_state
 
-# ============================================================
-# 1. CONFIGURATION
-# ============================================================
+APP_NAME = "The Neurometric Gaze"
+SEED = 42
+EMOTIONS = ["anger", "anticipation", "disgust", "fear",
+            "joy", "sadness", "surprise", "trust"]
+NEGATORS = {"not", "no", "never", "neither", "nor", "without", "hardly", "n't"}
+INTENSIFIERS = {"very", "extremely", "really", "so", "deeply", "incredibly"}
+DAMPENERS = {"slightly", "somewhat", "a little", "barely", "kind of", "sort of"}
 
-APP_VERSION = "3.0.1"
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def get_writable_output_dir() -> Optional[Path]:
-    """Return a writable runtime directory without writing into the app source.
+def normalize_id(value: Any) -> str:
+    if pd.isna(value):
+        return ""
+    s = str(value).strip()
+    # DAIC participant identifiers may be read as floats by pandas.
+    if re.fullmatch(r"\d+\.0", s):
+        s = s[:-2]
+    return s
 
-    Streamlit Cloud mounts the repository under /mount/src, which is commonly
-    read-only. Use the platform temporary directory first and fail gracefully
-    if the runtime does not permit filesystem writes.
-    """
-    candidates = [
-        Path(tempfile.gettempdir()) / "neurometric_gaze",
-        Path.home() / ".cache" / "neurometric_gaze",
-    ]
+
+def normalize_text(value: Any) -> str:
+    return "" if pd.isna(value) else re.sub(r"\s+", " ", str(value)).strip()
+
+
+def first_existing(columns, candidates):
+    lookup = {str(c).lower(): c for c in columns}
     for candidate in candidates:
-        try:
-            candidate.mkdir(parents=True, exist_ok=True)
-            probe = candidate / ".write_test"
-            probe.write_text("ok", encoding="utf-8")
-            probe.unlink(missing_ok=True)
-            return candidate
-        except (OSError, PermissionError):
-            continue
+        if candidate.lower() in lookup:
+            return lookup[candidate.lower()]
     return None
 
 
-OUTPUT_DIR = get_writable_output_dir()
-PROJECT_NAME = "The Neurometric Gaze"
-PROJECT_SUBTITLE = (
-    "Computational Narrative Medicine & Patient–Physician "
-    "Communication Research"
-)
-
-st.set_page_config(
-    page_title=f"{PROJECT_NAME} | Research Edition",
-    page_icon="🧠",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-st.markdown(
+def load_nrc_lexicon(uploaded_file) -> pd.DataFrame:
     """
-    <style>
-    .stApp { background: #F5F7FA; }
-    [data-testid="stMetric"] {
-        background: #FFFFFF;
-        border: 1px solid #E2E8F0;
-        padding: 15px;
-        border-radius: 12px;
-    }
-    .hero {
-        background: linear-gradient(120deg, #10243A, #244C65);
-        padding: 30px;
-        border-radius: 16px;
-        color: white;
-        margin-bottom: 18px;
-    }
-    .hero h1 { color: white; font-size: 34px; margin-bottom: 5px; }
-    .hero p { color: #DCE8F0; }
-    .muted { color: #64748B; font-size: 0.88rem; }
-    .research-card {
-        background: white;
-        border: 1px solid #E2E8F0;
-        border-radius: 12px;
-        padding: 17px;
-        margin-bottom: 10px;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-# ============================================================
-# 2. RESEARCH FRAMEWORK AND LEXICON
-# ============================================================
-
-RESEARCH_QUESTION = (
-    "How can transparent computational language analysis help researchers "
-    "study linguistic indicators of communication barriers in "
-    "patient–physician narratives?"
-)
-
-MARKER_LIBRARY: Dict[str, Dict[str, Any]] = {
-    "Hesitation": {
-        "description": "Expressions of reluctance or difficulty speaking.",
-        "patterns": [
-            r"\bi hesitated\b", r"\bi couldn't say\b", r"\bi could not say\b",
-            r"\bi was reluctant\b", r"\bi didn't know how to say\b",
-            r"\bi did not know how to say\b", r"\bi struggled to tell\b",
-            r"\bdeməyə çətinlik çəkdim\b", r"\bdanışmağa çəkindim\b",
-            r"\bdeməyə çəkindim\b", r"\bdilə gətirə bilmədim\b",
-            r"\bdeyə bilmədim\b", r"\btərəddüd etdim\b",
-            r"\bdanışmağa tərəddüd etdim\b",
-        ],
-    },
-    "Fear and Anxiety": {
-        "description": "Explicit lexical expressions of fear or worry.",
-        "patterns": [
-            r"\bi was afraid\b", r"\bi was scared\b", r"\bi feared\b",
-            r"\bi felt anxious\b", r"\bi was worried\b",
-            r"\bi felt frightened\b", r"\bqorxdum\b", r"\bqorxurdum\b",
-            r"\bqorxuram\b", r"\bnarahat idim\b", r"\bnarahat oldum\b",
-            r"\btəşvişə düşdüm\b",
-        ],
-    },
-    "Avoidance": {
-        "description": "Expressions potentially indicating topic avoidance.",
-        "patterns": [
-            r"\bit doesn't matter\b", r"\bit is not important\b",
-            r"\bnever mind\b", r"\bi ignored it\b", r"\bi avoided\b",
-            r"\bi just waited\b", r"\bvacib deyil\b", r"\bönəmli deyil\b",
-            r"\bəhəmiyyət vermədim\b", r"\bsadəcə gözlədim\b",
-            r"\böz-özünə keçər\b", r"\bboş ver\b",
-        ],
-    },
-    "Self-Censorship": {
-        "description": "Expressions of withholding or not disclosing information.",
-        "patterns": [
-            r"\bi kept it to myself\b", r"\bi hid it\b",
-            r"\bi didn't tell the doctor\b", r"\bi did not tell the doctor\b",
-            r"\bi kept silent\b", r"\bi remained silent\b",
-            r"\bi concealed\b", r"\bi chose not to mention\b",
-            r"\bsusdum\b", r"\bgizlətdim\b", r"\bdemədim\b",
-            r"\bdanışmadım\b", r"\bheç kimə demədim\b",
-            r"\böz içimdə saxladım\b",
-        ],
-    },
-    "Power Imbalance": {
-        "description": "References to authority, judgment, or unequal interaction.",
-        "patterns": [
-            r"\bthe doctor would be angry\b", r"\bthe doctor might judge me\b",
-            r"\bi was afraid of the doctor\b", r"\bthe doctor wouldn't listen\b",
-            r"\bhe wouldn't believe me\b", r"\bshe wouldn't believe me\b",
-            r"\bhəkim əsəbləşər\b", r"\bhəkim məni danlayar\b",
-            r"\bmənə inanmaz\b", r"\bhəkimdən qorxdum\b",
-            r"\bməni dinləmədi\b",
-        ],
-    },
-    "Dismissal and Minimisation": {
-        "description": "Expressions that may minimise symptoms or concerns.",
-        "patterns": [
-            r"\bit is probably nothing\b", r"\bit's probably nothing\b",
-            r"\bi am overreacting\b", r"\bi don't want to bother\b",
-            r"\bi didn't want to bother\b", r"\bjust a small problem\b",
-            r"\bproblem deyil\b", r"\byəqin ki, heç nə deyil\b",
-            r"\bşişirtmək istəmədim\b", r"\bəhəmiyyətsiz hesab etdim\b",
-        ],
-    },
-    "Empathic Communication": {
-        "description": "Explicit supportive or validating language.",
-        "patterns": [
-            r"\bi understand how you feel\b", r"\bi hear your concern\b",
-            r"\btake your time\b", r"\bthank you for telling me\b",
-            r"\byour concerns matter\b", r"\bsizi başa düşürəm\b",
-            r"\bsizi dinləyirəm\b", r"\brahat danışa bilərsiniz\b",
-            r"\btəşəkkür edirəm ki, paylaşdınız\b",
-        ],
-    },
-    "Patient Agency": {
-        "description": "Expressions of choice, participation, or self-advocacy.",
-        "patterns": [
-            r"\bi asked for clarification\b", r"\bi explained my concerns\b",
-            r"\bi wanted to understand\b", r"\bi made the decision\b",
-            r"\bi asked questions\b", r"\bfikrimi bildirdim\b",
-            r"\bsual verdim\b", r"\bqərarı özüm verdim\b",
-            r"\bnarahatlığımı izah etdim\b",
-        ],
-    },
-}
-
-NEGATION_PATTERNS = [
-    r"\bnot\b", r"\bnever\b", r"\bno longer\b", r"\bdidn't\b",
-    r"\bdid not\b", r"\bwasn't\b", r"\bwas not\b", r"\bcannot\b",
-    r"\bcan't\b", r"\bqorxmadım\b", r"\bqorxmuram\b",
-    r"\bnarahat deyiləm\b", r"\bsusmadım\b",
-]
-
-# ============================================================
-# 3. SESSION STATE
-# ============================================================
-
-DEFAULT_STATE = {
-    "annotation_records": [],
-    "analysis_history": [],
-    "last_analysis": None,
-    "trained_model": None,
-    "trained_model_info": None,
-    "uploaded_dataset": None,
-    "validation_results": None,
-}
-
-for key, value in DEFAULT_STATE.items():
-    if key not in st.session_state:
-        st.session_state[key] = value.copy() if isinstance(value, (list, dict)) else value
-
-# ============================================================
-# 4. TEXT PROCESSING
-# ============================================================
-
-def normalize_text(text: Any) -> str:
-    """Normalize whitespace and case while preserving punctuation."""
-    if pd.isna(text):
-        return ""
-    return re.sub(r"\s+", " ", str(text)).strip().lower()
-
-
-def split_sentences(text: str) -> List[str]:
-    """Lightweight sentence splitter; not a full linguistic parser."""
-    chunks = re.split(r"(?<=[.!?])\s+|\n+", str(text).strip())
-    return [chunk.strip() for chunk in chunks if chunk.strip()]
-
-
-def detect_language_heuristic(text: str) -> str:
+    Parse NRC Word-Emotion Association Lexicon.
+    Common official format: word<TAB>emotion<TAB>association.
     """
-    Transparent script/character heuristic.
-    This is not a reliable language-identification model.
+    raw = uploaded_file.getvalue()
+    text = raw.decode("utf-8", errors="replace")
+    rows = []
+    for line in text.splitlines():
+        parts = line.strip().split("\t")
+        if len(parts) < 3:
+            continue
+        word, emotion, assoc = parts[0].strip().lower(), parts[1].strip().lower(), parts[2].strip()
+        if emotion not in EMOTIONS or not word:
+            continue
+        try:
+            value = int(float(assoc))
+        except ValueError:
+            continue
+        if value in (0, 1):
+            rows.append((word, emotion, value))
+    lex = pd.DataFrame(rows, columns=["word", "emotion", "association"])
+    if lex.empty:
+        raise ValueError("No valid NRC rows found. Expected tab-separated word, emotion, association columns.")
+    return lex.drop_duplicates(["word", "emotion"], keep="last")
+
+
+def fallback_lexicon() -> pd.DataFrame:
     """
-    text_lower = normalize_text(text)
-    az_chars = set("əğıöüşç")
-    if any(char in az_chars for char in text_lower):
-        return "Azerbaijani-likely"
-    if re.search(r"[a-z]", text_lower):
-        return "English-or-other-Latin"
-    return "Unknown"
+    Small transparent demonstration lexicon only.
+    It is NOT the NRC Emotion Lexicon and must never be reported as such.
+    """
+    seed = {
+        "anger": "angry annoyed furious irritated mad rage hate",
+        "anticipation": "expect hope anticipate eager await prepare",
+        "disgust": "disgusted revolted gross repulsive nauseated",
+        "fear": "afraid scared frightened anxious nervous worry worried panic",
+        "joy": "happy joyful delighted pleased glad cheerful love",
+        "sadness": "sad unhappy depressed lonely grief sorrow miserable",
+        "surprise": "surprised astonished amazed unexpected shocking",
+        "trust": "trust confident secure safe reliable believe",
+    }
+    return pd.DataFrame(
+        [(w, emotion, 1) for emotion, words in seed.items() for w in words.split()],
+        columns=["word", "emotion", "association"],
+    )
 
 
-def detect_negation(sentence: str, start_position: int) -> bool:
-    """Simple local-window negation flag; requires human review."""
-    preceding = normalize_text(sentence)[:start_position][-65:]
-    return any(re.search(pattern, preceding) for pattern in NEGATION_PATTERNS)
+def lexicon_lookup(lexicon: pd.DataFrame) -> Dict[str, set]:
+    result = {emotion: set() for emotion in EMOTIONS}
+    for row in lexicon.itertuples(index=False):
+        if int(row.association) == 1 and row.emotion in result:
+            result[row.emotion].add(str(row.word).lower())
+    return result
 
 
-def analyze_sentence(sentence: str) -> List[Dict[str, Any]]:
-    normalized = normalize_text(sentence)
-    findings: List[Dict[str, Any]] = []
+def emotion_lexical_analysis(text: str, lookup: Dict[str, set]) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Token-level NRC-style word association analysis.
+    Negation and intensifier handling is intentionally conservative and heuristic.
+    Counts are not emotion recognition or psychological assessment.
+    """
+    tokens = re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?", normalize_text(text).lower())
+    rows = []
+    for i, token in enumerate(tokens):
+        matched = [e for e in EMOTIONS if token in lookup.get(e, set())]
+        if not matched:
+            continue
+        context = tokens[max(0, i - 3):i]
+        negated = any(t in NEGATORS or t.endswith("n't") for t in context)
+        intensified = any(t in INTENSIFIERS for t in context)
+        dampened = any(t in DAMPENERS for t in context)
+        for emotion in matched:
+            rows.append({
+                "token_index": i,
+                "token": token,
+                "lexicon_category": emotion,
+                "preceding_negation_heuristic": negated,
+                "preceding_intensifier_heuristic": intensified,
+                "preceding_dampener_heuristic": dampened,
+            })
+    matches = pd.DataFrame(rows, columns=[
+        "token_index", "token", "lexicon_category",
+        "preceding_negation_heuristic",
+        "preceding_intensifier_heuristic",
+        "preceding_dampener_heuristic",
+    ])
+    counts = []
+    total_tokens = max(len(tokens), 1)
+    for emotion in EMOTIONS:
+        subset = matches[matches["lexicon_category"] == emotion] if not matches.empty else matches
+        raw = int(len(subset))
+        negated = int(subset["preceding_negation_heuristic"].sum()) if raw else 0
+        counts.append({
+            "emotion lexicon category": emotion,
+            "word-association matches": raw,
+            "negation-window matches (heuristic)": negated,
+            "matches per 1,000 tokens": raw / total_tokens * 1000,
+            "share of all emotion matches": raw / max(len(matches), 1),
+        })
+    return pd.DataFrame(counts), matches
 
-    for category, info in MARKER_LIBRARY.items():
-        for pattern in info["patterns"]:
-            for match in re.finditer(pattern, normalized, flags=re.IGNORECASE):
-                negated = detect_negation(normalized, match.start())
-                findings.append({
-                    "category": category,
-                    "matched_expression": match.group(0),
-                    "sentence": sentence,
-                    "negation_flag": bool(negated),
-                    "description": info["description"],
-                    "interpretation": (
-                        "Potentially negated lexical match; human review required."
-                        if negated else
-                        "Potential lexical indicator; not a psychological or clinical finding."
-                    ),
-                })
 
-    return findings
+def parse_daic_zip(zip_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, List[str]]:
+    """
+    Parse official DAIC-WOZ ZIP structure:
+      <session>_P/<session>_TRANSCRIPT.csv
+      train_split_Depression_AVEC2017.csv
+      dev_split_Depression_AVEC2017.csv
+      test_split_Depression_AVEC2017.csv
+
+    Returns participant-level transcript rows joined only to official train/dev
+    labels. Does not infer labels for the unlabeled official test split.
+    """
+    notes = []
+    transcripts = []
+    labels_by_split = {}
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        names = zf.namelist()
+        for name in names:
+            lower = name.lower()
+            if lower.endswith(".csv") and any(k in lower for k in [
+                "train_split_depression_avec2017",
+                "dev_split_depression_avec2017",
+                "test_split_depression_avec2017",
+            ]):
+                try:
+                    label_df = pd.read_csv(zf.open(name))
+                    split = "train" if "train_split" in lower else "dev" if "dev_split" in lower else "test"
+                    labels_by_split[split] = label_df
+                except Exception as exc:
+                    notes.append(f"Could not read label file {name}: {exc}")
+
+        transcript_files = [n for n in names if n.lower().endswith("_transcript.csv")]
+        for name in transcript_files:
+            # Session ID is the leading numeric folder/file component.
+            match = re.search(r"(\d+)_TRANSCRIPT\.csv$", name, re.IGNORECASE)
+            if not match:
+                match = re.search(r"(\d+)", Path(name).name)
+            if not match:
+                continue
+            participant_id = normalize_id(match.group(1))
+            try:
+                tr = pd.read_csv(zf.open(name))
+            except Exception as exc:
+                notes.append(f"Could not read transcript {name}: {exc}")
+                continue
+            speaker_col = first_existing(tr.columns, ["speaker"])
+            text_col = first_existing(tr.columns, ["value", "text", "utterance"])
+            if text_col is None:
+                notes.append(f"Transcript {name} has no text/value column.")
+                continue
+            if speaker_col:
+                # The DAIC-WOZ speaker field normally distinguishes Participant and Ellie.
+                participant_rows = tr[
+                    tr[speaker_col].astype(str).str.lower().str.contains("participant", na=False)
+                ]
+                if participant_rows.empty:
+                    notes.append(
+                        f"No speaker value containing 'Participant' found in {name}; "
+                        "file skipped rather than mixing interviewer and participant speech."
+                    )
+                    continue
+                tr = participant_rows
+            text = " ".join(tr[text_col].map(normalize_text).tolist()).strip()
+            if not text:
+                continue
+            transcripts.append({
+                "participant_id": participant_id,
+                "text": text,
+                "source_file": name,
+                "group_id": participant_id,
+            })
+
+    transcript_df = pd.DataFrame(transcripts)
+    if transcript_df.empty:
+        raise ValueError(
+            "No DAIC-WOZ transcript files were found. Expected files ending "
+            "with _TRANSCRIPT.csv inside session folders."
+        )
+
+    def normalize_labels(label_df, split):
+        pid = first_existing(label_df.columns, ["Participant_ID", "participant_id", "participant"])
+        binary = first_existing(label_df.columns, ["PHQ8_Binary", "PHQ8_Binary_Label", "phq8_binary"])
+        score = first_existing(label_df.columns, ["PHQ8_Score", "PHQ8", "phq8_score"])
+        if pid is None:
+            notes.append(f"{split} label file has no Participant_ID column.")
+            return pd.DataFrame()
+        out = pd.DataFrame({"participant_id": label_df[pid].map(normalize_id)})
+        if binary:
+            out["PHQ8_Binary"] = pd.to_numeric(label_df[binary], errors="coerce")
+        if score:
+            out["PHQ8_Score"] = pd.to_numeric(label_df[score], errors="coerce")
+        out["official_split"] = split
+        return out
+
+    label_frames = []
+    for split in ("train", "dev", "test"):
+        if split in labels_by_split:
+            lab = normalize_labels(labels_by_split[split], split)
+            if not lab.empty:
+                label_frames.append(lab)
+    labels = pd.concat(label_frames, ignore_index=True) if label_frames else pd.DataFrame()
+
+    if not labels.empty:
+        merged = transcript_df.merge(labels, on="participant_id", how="left", validate="one_to_one")
+    else:
+        merged = transcript_df.copy()
+        merged["PHQ8_Binary"] = np.nan
+        merged["PHQ8_Score"] = np.nan
+        merged["official_split"] = "unknown"
+
+    notes.append(
+        "DAIC-WOZ files are access-controlled. Confirm the archive's provenance and "
+        "permitted use. Participant transcript text is sensitive even when names are absent."
+    )
+    return merged, transcript_df, labels, notes
 
 
-def analyze_document(text: str) -> Dict[str, Any]:
-    sentences = split_sentences(text)
-    sentence_results = []
-    all_findings = []
+def load_generic_csv(file) -> pd.DataFrame:
+    df = pd.read_csv(file)
+    pid = first_existing(df.columns, ["participant_id", "Participant_ID", "session_id", "group_id"])
+    txt = first_existing(df.columns, ["text", "transcript", "value", "utterance"])
+    binary = first_existing(df.columns, ["PHQ8_Binary", "phq8_binary", "label", "target"])
+    score = first_existing(df.columns, ["PHQ8_Score", "phq8_score"])
+    if pid is None or txt is None:
+        raise ValueError("CSV requires participant_id/Participant_ID and text/transcript columns.")
+    out = pd.DataFrame({
+        "participant_id": df[pid].map(normalize_id),
+        "group_id": df[pid].map(normalize_id),
+        "text": df[txt].map(normalize_text),
+    })
+    out["PHQ8_Binary"] = pd.to_numeric(df[binary], errors="coerce") if binary else np.nan
+    out["PHQ8_Score"] = pd.to_numeric(df[score], errors="coerce") if score else np.nan
+    out["official_split"] = df["split"].astype(str).str.lower() if "split" in df.columns else "user_supplied"
+    out = out[(out["participant_id"] != "") & (out["text"] != "")]
+    return out.reset_index(drop=True)
 
-    for index, sentence in enumerate(sentences, start=1):
-        findings = analyze_sentence(sentence)
-        all_findings.extend(findings)
-        sentence_results.append({
-            "sentence_id": index,
-            "sentence": sentence,
-            "marker_count": len(findings),
-            "findings": findings,
+
+def make_model() -> Pipeline:
+    return Pipeline([
+        ("tfidf", TfidfVectorizer(
+            lowercase=True,
+            strip_accents="unicode",
+            ngram_range=(1, 2),
+            min_df=2,
+            max_df=0.98,
+            sublinear_tf=True,
+            max_features=30000,
+        )),
+        ("clf", LogisticRegression(
+            max_iter=4000,
+            class_weight="balanced",
+            solver="liblinear",
+            random_state=SEED,
+        )),
+    ])
+
+
+def classification_metrics(y_true, y_pred, y_prob=None) -> Dict[str, Any]:
+    y_true = np.asarray(y_true).astype(int)
+    y_pred = np.asarray(y_pred).astype(int)
+    p, r, f, s = precision_recall_fscore_support(
+        y_true, y_pred, labels=[0, 1], zero_division=0
+    )
+    result = {
+        "n": int(len(y_true)),
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
+        "macro_f1": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
+        "positive_class_precision": float(p[1]),
+        "positive_class_recall": float(r[1]),
+        "positive_class_f1": float(f[1]),
+        "negative_class_precision": float(p[0]),
+        "negative_class_recall": float(r[0]),
+        "negative_class_f1": float(f[0]),
+        "support_negative": int(s[0]),
+        "support_positive": int(s[1]),
+    }
+    if y_prob is not None and len(np.unique(y_true)) == 2:
+        result["roc_auc"] = float(roc_auc_score(y_true, y_prob))
+        result["brier_score"] = float(brier_score_loss(y_true, y_prob))
+    return result
+
+
+def nested_group_cv(train_df: pd.DataFrame, n_outer: int = 5) -> Dict[str, Any]:
+    """
+    Nested stratified group CV. Each participant is a group.
+    Hyperparameters are tuned only inside each outer training fold.
+    """
+    data = train_df.dropna(subset=["PHQ8_Binary"]).copy()
+    data["PHQ8_Binary"] = data["PHQ8_Binary"].astype(int)
+    if data["participant_id"].duplicated().any():
+        # The analysis unit is one participant-level transcript. Multiple rows
+        # per participant are aggregated before CV to avoid pseudo-replication.
+        data = data.groupby("participant_id", as_index=False).agg({
+            "text": lambda x: " ".join(x.astype(str)),
+            "PHQ8_Binary": "first",
+            "PHQ8_Score": "first",
+            "group_id": "first",
+            "official_split": "first",
+        })
+    if data["PHQ8_Binary"].nunique() != 2:
+        raise ValueError("PHQ8_Binary must contain both 0 and 1.")
+    min_class = int(data["PHQ8_Binary"].value_counts().min())
+    n_groups = data["group_id"].nunique()
+    folds = min(n_outer, min_class, n_groups)
+    if folds < 3:
+        raise ValueError("At least three observations in each class and three groups are needed for nested CV.")
+    X = data["text"].astype(str).to_numpy()
+    y = data["PHQ8_Binary"].to_numpy()
+    groups = data["group_id"].astype(str).to_numpy()
+    outer = StratifiedGroupKFold(n_splits=folds, shuffle=True, random_state=SEED)
+
+    oof_pred = np.zeros(len(data), dtype=int)
+    oof_prob = np.zeros(len(data), dtype=float)
+    fold_ids = np.zeros(len(data), dtype=int)
+    fold_rows = []
+
+    grid = {
+        "tfidf__ngram_range": [(1, 1), (1, 2)],
+        "clf__C": [0.1, 1.0, 10.0],
+    }
+
+    for fold, (tr_idx, te_idx) in enumerate(outer.split(X, y, groups), start=1):
+        Xtr, Xte = X[tr_idx], X[te_idx]
+        ytr, yte = y[tr_idx], y[te_idx]
+        gtr = groups[tr_idx]
+        inner_min = int(pd.Series(ytr).value_counts().min())
+        inner_groups = len(np.unique(gtr))
+        inner_n = min(3, inner_min, inner_groups)
+        if inner_n < 2:
+            raise ValueError(
+                f"Outer fold {fold} does not contain enough class/group diversity "
+                "for inner tuning. Use fewer folds only if justified, or obtain more data."
+            )
+        inner = StratifiedGroupKFold(n_splits=inner_n, shuffle=True, random_state=SEED + fold)
+        search = GridSearchCV(
+            make_model(), grid, scoring="f1_macro", cv=inner,
+            n_jobs=-1, refit=True, error_score="raise"
+        )
+        search.fit(Xtr, ytr, groups=gtr)
+        pred = search.predict(Xte)
+        prob = search.predict_proba(Xte)[:, list(search.classes_).index(1)]
+        oof_pred[te_idx] = pred
+        oof_prob[te_idx] = prob
+        fold_ids[te_idx] = fold
+        fold_rows.append({
+            "outer_fold": fold,
+            "n_train": len(tr_idx),
+            "n_test": len(te_idx),
+            "macro_f1": f1_score(yte, pred, average="macro", zero_division=0),
+            "best_parameters": json.dumps(search.best_params_, sort_keys=True),
         })
 
     return {
-        "sentences": sentence_results,
-        "findings": all_findings,
-        "language_heuristic": detect_language_heuristic(text),
+        "data": data,
+        "truth": y,
+        "pred": oof_pred,
+        "prob": oof_prob,
+        "fold_ids": fold_ids,
+        "metrics": classification_metrics(y, oof_pred, oof_prob),
+        "fold_table": pd.DataFrame(fold_rows),
     }
 
 
-def calculate_descriptive_indicators(text: str, findings: List[Dict[str, Any]]) -> Dict[str, Any]:
-    word_count = len(re.findall(r"\b[\w'-]+\b", str(text), flags=re.UNICODE))
-    total = len(findings)
-    negated = sum(bool(item["negation_flag"]) for item in findings)
-    non_negated = total - negated
-    categories = Counter(item["category"] for item in findings)
-
-    density = (non_negated / word_count * 100) if word_count else 0.0
-
-    return {
-        "word_count": word_count,
-        "total_matches": total,
-        "negated_matches": negated,
-        "non_negated_matches": non_negated,
-        "marker_density_per_100_words": round(density, 2),
-        "category_distribution": dict(categories),
-    }
-
-
-def document_to_prediction(text: str, threshold: int = 1) -> int:
-    result = analyze_document(text)
-    indicators = calculate_descriptive_indicators(text, result["findings"])
-    return int(indicators["non_negated_matches"] >= threshold)
-
-
-# ============================================================
-# 5. STATISTICAL UTILITIES
-# ============================================================
-
-def normalize_binary_label(value: Any) -> Optional[int]:
-    if pd.isna(value):
-        return None
-    value = str(value).strip().lower()
-    positive = {"1", "positive", "yes", "true", "present", "barrier"}
-    negative = {"0", "negative", "no", "false", "absent", "no barrier"}
-    if value in positive:
-        return 1
-    if value in negative:
-        return 0
-    return None
-
-
-def krippendorff_alpha_nominal(ratings: List[List[Optional[int]]]) -> Optional[float]:
-    """
-    Krippendorff's alpha for nominal data.
-    Rows are units; columns are raters. None denotes missing annotation.
-    Returns None when there is insufficient information or zero observed
-    disagreement denominator.
-    """
-    coincidence = {}
-    n_units_with_data = 0
-
-    for row in ratings:
-        values = [v for v in row if v is not None]
-        if len(values) < 2:
-            continue
-        n_units_with_data += 1
-        m = len(values)
-        for i in range(m):
-            for j in range(m):
-                if i != j:
-                    pair = (values[i], values[j])
-                    coincidence[pair] = coincidence.get(pair, 0.0) + 1.0 / (m - 1)
-
-    if not coincidence or n_units_with_data == 0:
-        return None
-
-    categories = {x for pair in coincidence for x in pair}
-    total = sum(coincidence.values())
-    marginals = {c: 0.0 for c in categories}
-
-    for (a, b), count in coincidence.items():
-        marginals[a] += count
-
-    observed_disagreement = 0.0
-    for (a, b), count in coincidence.items():
-        if a != b:
-            observed_disagreement += count
-    observed_disagreement /= total
-
-    expected_disagreement = 0.0
-    if total <= 1:
-        return None
-
-    for a in categories:
-        for b in categories:
-            if a != b:
-                expected_disagreement += marginals[a] * marginals[b]
-    expected_disagreement /= (total * (total - 1))
-
-    if expected_disagreement == 0:
-        return None
-
-    return float(1 - observed_disagreement / expected_disagreement)
-
-
-def bootstrap_f1_interval(
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    n_bootstrap: int = 1000,
-    seed: int = 42,
-) -> Tuple[Optional[float], Optional[float]]:
-    """Percentile bootstrap interval for F1; descriptive, not a substitute for design."""
-    if len(y_true) < 2:
-        return None, None
-
+def bootstrap_ci(y, pred, n_boot=2000, seed=SEED):
+    y = np.asarray(y, dtype=int)
+    pred = np.asarray(pred, dtype=int)
     rng = np.random.default_rng(seed)
-    scores = []
-    n = len(y_true)
-
-    for _ in range(n_bootstrap):
-        indices = rng.integers(0, n, size=n)
-        yt = y_true[indices]
-        yp = y_pred[indices]
-        if len(np.unique(yt)) < 2:
+    values = []
+    for _ in range(n_boot):
+        idx = rng.integers(0, len(y), len(y))
+        if len(np.unique(y[idx])) < 2:
             continue
-        scores.append(f1_score(yt, yp, zero_division=0))
-
-    if not scores:
-        return None, None
-
-    low, high = np.percentile(scores, [2.5, 97.5])
-    return float(low), float(high)
-
-
-# ============================================================
-# 6. MODEL TRAINING AND EVALUATION
-# ============================================================
-
-def build_tfidf_logistic_pipeline() -> Pipeline:
-    return Pipeline([
-        ("tfidf", TfidfVectorizer(
-            ngram_range=(1, 2),
-            min_df=1,
-            max_features=30000,
-            sublinear_tf=True,
-        )),
-        ("classifier", LogisticRegression(
-            max_iter=2000,
-            class_weight="balanced",
-            random_state=42,
-        )),
-    ])
-
-
-def train_supervised_model(
-    dataframe: pd.DataFrame,
-    text_column: str,
-    label_column: str,
-    test_size: float = 0.25,
-    random_state: int = 42,
-) -> Dict[str, Any]:
-    """
-    Train a transparent TF-IDF + Logistic Regression baseline.
-    Requires an independently labelled dataset.
-    """
-    work = dataframe[[text_column, label_column]].copy()
-    work = work.dropna()
-    work[text_column] = work[text_column].astype(str)
-    work["__label"] = work[label_column].apply(normalize_binary_label)
-    work = work.dropna(subset=["__label"])
-    work["__label"] = work["__label"].astype(int)
-
-    if len(work) < 12:
-        raise ValueError("At least 12 valid labelled records are required for this exploratory split.")
-    if work["__label"].nunique() != 2:
-        raise ValueError("The gold-label column must contain both positive and negative examples.")
-    if work["__label"].value_counts().min() < 2:
-        raise ValueError("Each class needs at least two records for a stratified split.")
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        work[text_column],
-        work["__label"],
-        test_size=test_size,
-        random_state=random_state,
-        stratify=work["__label"],
-    )
-
-    model = build_tfidf_logistic_pipeline()
-    model.fit(X_train, y_train)
-    predictions = model.predict(X_test)
-
-    metrics = {
-        "n_total": int(len(work)),
-        "n_train": int(len(X_train)),
-        "n_test": int(len(X_test)),
-        "accuracy": float(accuracy_score(y_test, predictions)),
-        "precision": float(precision_score(y_test, predictions, zero_division=0)),
-        "recall": float(recall_score(y_test, predictions, zero_division=0)),
-        "f1": float(f1_score(y_test, predictions, zero_division=0)),
-        "kappa": float(cohen_kappa_score(y_test, predictions)),
-        "confusion_matrix": confusion_matrix(y_test, predictions, labels=[0, 1]).tolist(),
-        "classification_report": classification_report(
-            y_test, predictions, zero_division=0, output_dict=True
-        ),
-    }
-
-    low, high = bootstrap_f1_interval(
-        np.asarray(y_test),
-        np.asarray(predictions),
-    )
-    metrics["f1_bootstrap_95ci"] = [low, high]
-
+        values.append(f1_score(y[idx], pred[idx], average="macro", zero_division=0))
+    if len(values) < 100:
+        raise ValueError("Too few valid bootstrap replicates; sample may be too small or highly imbalanced.")
     return {
-        "model": model,
-        "metrics": metrics,
-        "y_test": np.asarray(y_test),
-        "predictions": np.asarray(predictions),
-        "test_text": list(X_test),
-        "feature_names": model.named_steps["tfidf"].get_feature_names_out(),
+        "estimate": float(f1_score(y, pred, average="macro", zero_division=0)),
+        "lower_95": float(np.quantile(values, 0.025)),
+        "upper_95": float(np.quantile(values, 0.975)),
+        "valid_replicates": len(values),
     }
 
 
-# ============================================================
-# 7. DATA EXPORT AND REPORT HELPERS
-# ============================================================
-
-def dataframe_csv_bytes(dataframe: pd.DataFrame) -> bytes:
-    return dataframe.to_csv(index=False).encode("utf-8-sig")
-
-
-def json_bytes(payload: Dict[str, Any]) -> bytes:
-    return json.dumps(payload, ensure_ascii=False, indent=2, default=str).encode("utf-8")
-
-
-def make_research_report(analysis: Dict[str, Any]) -> str:
-    findings = analysis["result"]["findings"]
-    indicators = analysis["indicators"]
-    categories = indicators["category_distribution"]
-
-    lines = [
-        f"# {PROJECT_NAME}",
-        "",
-        "## Exploratory analysis report",
-        "",
-        f"- Generated (UTC): {datetime.now(timezone.utc).isoformat()}",
-        f"- Application version: {APP_VERSION}",
-        f"- Heuristic language estimate: {analysis['result']['language_heuristic']}",
-        f"- Word count: {indicators['word_count']}",
-        f"- Lexical matches: {indicators['total_matches']}",
-        f"- Potentially negated matches: {indicators['negated_matches']}",
-        f"- Non-negated matches: {indicators['non_negated_matches']}",
-        f"- Descriptive marker density per 100 words: {indicators['marker_density_per_100_words']}",
-        "",
-        "## Category counts",
-    ]
-
-    if categories:
-        for category, count in categories.items():
-            lines.append(f"- {category}: {count}")
-    else:
-        lines.append("- No lexicon matches detected.")
-
-    lines.extend([
-        "",
-        "## Interpretation boundary",
-        "",
-        "These results are exploratory lexical matches. They do not establish",
-        "a patient's psychological state, intent, diagnosis, or actual",
-        "communication behaviour. Contextual human review is required.",
-        "",
-        "## Detected expressions",
-    ])
-
-    for item in findings:
-        lines.append(
-            f"- **{item['category']}** — `{item['matched_expression']}` "
-            f"(negation flag: {item['negation_flag']})"
+def train_on_official_train_evaluate_dev(df: pd.DataFrame) -> Dict[str, Any]:
+    train = df[(df["official_split"].astype(str).str.lower() == "train")].dropna(subset=["PHQ8_Binary"]).copy()
+    dev = df[(df["official_split"].astype(str).str.lower().isin(["dev", "development", "validation"]))].dropna(subset=["PHQ8_Binary"]).copy()
+    if train.empty or dev.empty:
+        raise ValueError(
+            "Official train and dev labelled rows are required. The official DAIC-WOZ "
+            "test split normally has no PHQ-8 labels in the distributed metadata."
         )
-        lines.append(f"  - Sentence: {item['sentence']}")
+    train["PHQ8_Binary"] = train["PHQ8_Binary"].astype(int)
+    dev["PHQ8_Binary"] = dev["PHQ8_Binary"].astype(int)
+    if train["PHQ8_Binary"].nunique() != 2:
+        raise ValueError("Training split needs both PHQ8_Binary classes.")
+    model = make_model()
+    model.fit(train["text"].astype(str), train["PHQ8_Binary"])
+    pred = model.predict(dev["text"].astype(str))
+    prob = model.predict_proba(dev["text"].astype(str))[:, list(model.classes_).index(1)]
+    return {
+        "train": train, "dev": dev, "model": model,
+        "truth": dev["PHQ8_Binary"].to_numpy(),
+        "pred": pred, "prob": prob,
+        "metrics": classification_metrics(dev["PHQ8_Binary"], pred, prob),
+    }
 
-    lines.extend([
-        "",
-        "## Methodological limitations",
-        "",
-        "- The current lexicon is manually defined and not clinically validated.",
-        "- Sentence segmentation and negation detection are heuristic.",
-        "- No causal inference is made.",
-        "- No clinical risk score is calculated.",
-        "- Performance metrics require independent human-labelled data.",
-    ])
 
-    return "\n".join(lines)
+def safe_download_df(df, name):
+    return st.download_button(
+        name,
+        df.to_csv(index=False).encode("utf-8"),
+        file_name=name.lower().replace(" ", "_") + ".csv",
+        mime="text/csv",
+    )
 
 
-# ============================================================
-# 8. SIDEBAR
-# ============================================================
+# ------------------------------ Streamlit UI ------------------------------
 
-st.sidebar.title("Research Configuration")
-st.sidebar.caption(f"Version {APP_VERSION}")
-
-analysis_language = st.sidebar.selectbox(
-    "Research language",
-    ["Azerbaijani", "English", "Mixed / Multilingual"],
-)
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("### Theoretical foundations")
-st.sidebar.markdown(
-    """
-    - Narrative Medicine
-    - Health Communication
-    - Medical Humanities
-    - Computational Linguistics
-    - Explainable AI
-    - Patient-centred care
-    """
-)
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("### Research session")
-st.sidebar.write(f"Annotations: {len(st.session_state.annotation_records)}")
-st.sidebar.write(f"Analyses: {len(st.session_state.analysis_history)}")
-st.sidebar.write(
-    "Supervised model: "
-    + ("Trained in this session" if st.session_state.trained_model else "Not trained")
-)
-
-if st.sidebar.button("Clear session data", use_container_width=True):
-    for key, value in DEFAULT_STATE.items():
-        st.session_state[key] = value.copy() if isinstance(value, (list, dict)) else value
-    st.rerun()
-
-# ============================================================
-# 9. HEADER
-# ============================================================
-
-st.markdown(
-    f"""
-    <div class="hero">
-        <h1>🧠 {PROJECT_NAME}</h1>
-        <p><strong>COMPUTATIONAL NARRATIVE MEDICINE & COMMUNICATION INTELLIGENCE</strong></p>
-        <hr>
-        <p>{PROJECT_SUBTITLE}</p>
-        <p><em>{RESEARCH_QUESTION}</em></p>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
+st.set_page_config(page_title=APP_NAME, page_icon="◉", layout="wide")
+st.title(APP_NAME)
+st.caption("Clinical communication, participant narratives, and explainable language analysis")
 st.warning(
-    "Research-only prototype. Do not use for diagnosis, triage, treatment, "
-    "or individual patient risk assessment. Do not enter identifiable patient data."
+    "Research prototype only. No diagnosis, triage, treatment recommendation, "
+    "or inference of a person's actual emotional state. Do not upload identifiable "
+    "patient data unless you have explicit institutional approval and lawful authority."
 )
 
-# ============================================================
-# 10. NAVIGATION
-# ============================================================
+if "daic_df" not in st.session_state:
+    st.session_state.daic_df = None
+if "cv_result" not in st.session_state:
+    st.session_state.cv_result = None
+if "dev_result" not in st.session_state:
+    st.session_state.dev_result = None
+if "lexicon" not in st.session_state:
+    st.session_state.lexicon = fallback_lexicon()
+if "lexicon_is_nrc" not in st.session_state:
+    st.session_state.lexicon_is_nrc = False
 
-tabs = st.tabs([
-    "Overview",
-    "Text Analysis",
-    "Explainability",
-    "Human Annotation",
-    "Research Validation",
-    "Model Laboratory",
-    "Narrative Comparison",
-    "Research Reports",
-    "Methodology & Ethics",
-])
+with st.sidebar:
+    st.header("Research modules")
+    page = st.radio("Navigate", [
+        "Research overview",
+        "Dataset ingestion",
+        "Lexical emotion analysis",
+        "Internal validation",
+        "Official development evaluation",
+        "Error analysis",
+        "Methodology and ethics",
+    ])
+    st.divider()
+    st.caption("English-only interface | Reproducibility seed 42")
 
-# ============================================================
-# TAB 1 — OVERVIEW
-# ============================================================
+df = st.session_state.daic_df
 
-with tabs[0]:
-    st.header("Research Overview")
+if page == "Research overview":
+    st.header("Research design")
+    st.markdown("""
+    This application is designed around the **DAIC-WOZ** corpus, a collection of
+    clinical-style interviews with transcripts and questionnaire metadata. The
+    official corpus contains 189 sessions, and access is restricted to academic
+    and non-profit researchers following application and consent conditions.
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Research domains", "6")
-    col2.metric("Exploratory marker families", len(MARKER_LIBRARY))
-    col3.metric("Application version", APP_VERSION)
+    **Primary research question (recommended):**  
+    *To what extent do lexical and linguistic features in participant speech
+    associate with PHQ-8 self-reported symptom scores in the DAIC-WOZ sample?*
 
-    st.markdown("### Research objectives")
-    st.markdown(
-        """
-        1. Explore linguistic indicators that may be relevant to patient–physician communication.
-        2. Make text-analysis outputs transparent and reviewable.
-        3. Compare computational outputs with independent human annotations.
-        4. Examine model performance across language groups when suitable data exist.
-        5. Document uncertainty, error patterns, and ethical limitations.
-        """
-    )
-
-    st.markdown("### Conceptual dimensions")
-    dimensions = pd.DataFrame({
-        "Dimension": [
-            "Hesitation", "Fear and Anxiety", "Avoidance",
-            "Self-Censorship", "Power Imbalance",
-            "Dismissal and Minimisation", "Empathic Communication",
-            "Patient Agency",
-        ],
-        "Research focus": [
-            "Reluctance to speak",
-            "Explicit fear or worry language",
-            "Potential topic avoidance",
-            "Withholding or non-disclosure language",
-            "Authority and perceived judgment",
-            "Minimisation of concerns",
-            "Supportive and validating language",
-            "Participation and self-advocacy",
-        ],
-    })
-    st.dataframe(dimensions, use_container_width=True, hide_index=True)
-
-    st.info(
-        "The dimensions are an initial research taxonomy. They need a literature-grounded "
-        "codebook, expert review, and empirical refinement before research claims are made."
-    )
-
-# ============================================================
-# TAB 2 — TEXT ANALYSIS
-# ============================================================
-
-with tabs[1]:
-    st.header("Patient–Physician Narrative Analysis")
+    This is an association/prediction research question, not a diagnostic claim.
+    """)
+    st.subheader("Why this dataset?")
     st.write(
-        "Run transparent, exploratory lexical analysis on a short, anonymised text sample."
+        "DAIC-WOZ contains transcribed participant-interviewer sessions and PHQ-8 "
+        "questionnaire metadata. The official documentation describes 189 sessions "
+        "and separate train, development, and test split files. The test metadata "
+        "does not include PHQ-8 labels in the standard package."
     )
+    st.subheader("Separate constructs")
+    st.markdown("""
+    - **Lexical emotion association:** counts words associated with eight emotion categories.
+    - **PHQ-8 score:** participant-reported depressive symptom severity on a questionnaire.
+    - **Model prediction:** a statistical estimate learned from the supplied development labels.
+    
+    These are not interchangeable. A word associated with fear does not prove fear;
+    a PHQ-8 score is not a clinical diagnosis; predictive performance does not establish causation.
+    """)
+    st.info("Obtain the corpus from USC ICT before running any real-data analysis.")
 
-    example_text = (
-        "I wanted to tell the doctor about my headaches, "
-        "but I was afraid that he would become angry. "
-        "I kept silent and simply waited for a prescription. "
-        "I thought it was probably nothing."
-    )
+elif page == "Dataset ingestion":
+    st.header("Dataset ingestion")
+    st.markdown("""
+    **Option A — DAIC-WOZ archive:** upload the official ZIP containing session folders,
+    `*_TRANSCRIPT.csv`, and the official train/dev label CSVs.
 
-    patient_text = st.text_area(
-        "Enter an anonymised narrative",
-        value=example_text,
-        height=180,
-        key="analysis_input",
-    )
+    **Option B — normalized CSV:** provide `participant_id`, `text`,
+    `PHQ8_Binary`, `PHQ8_Score`, and optionally `split`.
+    """)
+    daic_zip = st.file_uploader("Official DAIC-WOZ ZIP archive", type=["zip"], key="daic_zip")
+    generic = st.file_uploader("Or upload a normalized participant-level CSV", type=["csv"], key="generic_csv")
+    if st.button("Load dataset", type="primary", disabled=(daic_zip is None and generic is None)):
+        try:
+            if daic_zip is not None:
+                merged, raw_transcripts, labels, notes = parse_daic_zip(daic_zip.getvalue())
+                st.session_state.daic_df = merged
+                st.session_state.ingestion_notes = notes
+                st.session_state.data_source = "DAIC-WOZ official archive"
+            else:
+                normalized = load_generic_csv(generic)
+                st.session_state.daic_df = normalized
+                st.session_state.ingestion_notes = [
+                    "Generic CSV format supplied by user; verify provenance, permissions, and official split integrity."
+                ]
+                st.session_state.data_source = "User-supplied normalized CSV"
+            st.session_state.cv_result = None
+            st.session_state.dev_result = None
+            st.success(f"Loaded {len(st.session_state.daic_df)} participant-level record(s).")
+        except Exception as exc:
+            st.error(f"Dataset could not be loaded: {exc}")
 
-    c1, c2 = st.columns([1, 3])
-    with c1:
-        run_analysis = st.button(
-            "Run exploratory analysis",
-            type="primary",
+    df = st.session_state.daic_df
+    if df is not None and not df.empty:
+        st.subheader("Dataset audit")
+        cols = st.columns(4)
+        cols[0].metric("Records", len(df))
+        cols[1].metric("Unique participants", df["participant_id"].nunique())
+        cols[2].metric("PHQ-8 binary labels", int(df["PHQ8_Binary"].notna().sum()))
+        cols[3].metric("PHQ-8 score labels", int(df["PHQ8_Score"].notna().sum()))
+        st.write("Source:", st.session_state.get("data_source", "Unknown"))
+        for note in st.session_state.get("ingestion_notes", []):
+            st.caption(note)
+        st.dataframe(
+            df[["participant_id", "official_split", "PHQ8_Binary", "PHQ8_Score"]].head(30),
             use_container_width=True,
         )
-    with c2:
-        st.caption(
-            "Text is processed in this Streamlit session. Hosting configuration, "
-            "logging, and deployment environment may affect data handling."
+        st.subheader("Official split distribution")
+        st.dataframe(
+            df.groupby("official_split", dropna=False).agg(
+                participants=("participant_id", "nunique"),
+                labelled=("PHQ8_Binary", "count"),
+            ).reset_index(),
+            use_container_width=True,
+            hide_index=True,
         )
+        st.warning("Avoid exporting or sharing raw transcript text. It may contain sensitive disclosures.")
 
-    if run_analysis:
-        if len(patient_text.strip()) < 10:
-            st.error("Please provide a longer text sample.")
-        else:
-            doc_result = analyze_document(patient_text)
-            indicators = calculate_descriptive_indicators(
-                patient_text, doc_result["findings"]
-            )
-            analysis_object = {
-                "text": patient_text,
-                "result": doc_result,
-                "indicators": indicators,
-                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-            }
-            st.session_state.last_analysis = analysis_object
-            st.session_state.analysis_history.append({
-                "timestamp_utc": analysis_object["timestamp_utc"],
-                "word_count": indicators["word_count"],
-                "matches": indicators["total_matches"],
-                "marker_density": indicators["marker_density_per_100_words"],
-            })
+elif page == "Lexical emotion analysis":
+    st.header("Lexical emotion analysis")
+    st.markdown("""
+    This module uses the **NRC Word-Emotion Association Lexicon** when you upload
+    the official lexicon file. NRC associates English words with eight emotion
+    categories: anger, anticipation, disgust, fear, joy, sadness, surprise, and trust.
 
-    if st.session_state.last_analysis:
-        current = st.session_state.last_analysis
-        indicators = current["indicators"]
-
-        st.divider()
-        st.subheader("Descriptive indicators")
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Word count", indicators["word_count"])
-        m2.metric("Lexical matches", indicators["total_matches"])
-        m3.metric("Negation flags", indicators["negated_matches"])
-        m4.metric(
-            "Matches / 100 words",
-            f"{indicators['marker_density_per_100_words']:.2f}",
-        )
-
-        st.caption(
-            "Density is a descriptive count, not a severity score, probability, "
-            "clinical measure, or validated psychometric instrument."
-        )
-        st.caption(
-            f"Language heuristic: {current['result']['language_heuristic']} "
-            "(not a validated language detector)."
-        )
-
-        st.subheader("Sentence-level analysis")
-        for sentence_data in current["result"]["sentences"]:
-            with st.expander(
-                f"Sentence {sentence_data['sentence_id']} — "
-                f"{sentence_data['marker_count']} matches"
-            ):
-                st.write(sentence_data["sentence"])
-                if sentence_data["findings"]:
-                    for finding in sentence_data["findings"]:
-                        st.markdown(
-                            f"**{finding['category']}** · "
-                            f"`{finding['matched_expression']}`"
-                        )
-                        st.caption(finding["interpretation"])
-                else:
-                    st.info("No current lexicon matches detected.")
-
-        if indicators["category_distribution"]:
-            st.subheader("Category distribution")
-            category_df = pd.DataFrame(
-                list(indicators["category_distribution"].items()),
-                columns=["Category", "Count"],
-            ).set_index("Category")
-            st.bar_chart(category_df)
-        else:
-            st.info(
-                "No lexicon matches were detected. This does not demonstrate "
-                "that communication barriers are absent."
-            )
-
-# ============================================================
-# TAB 3 — EXPLAINABILITY
-# ============================================================
-
-with tabs[2]:
-    st.header("Explainability & Traceable Evidence")
-    st.write(
-        "Inspect the exact lexical expressions and sentences that triggered the rules."
-    )
-
-    if not st.session_state.last_analysis:
-        st.info("Run a text analysis first.")
+    These are lexical associations, not validated measurements of a speaker's internal
+    emotional state. Context, negation, metaphor, quotation, sarcasm, and speaker intent
+    can change meaning.
+    """)
+    lex_upload = st.file_uploader("Upload NRC Emotion Lexicon text file (optional)", type=["txt"], key="nrc")
+    if lex_upload is not None:
+        try:
+            st.session_state.lexicon = load_nrc_lexicon(lex_upload)
+            st.session_state.lexicon_is_nrc = True
+            st.success(f"Loaded NRC-compatible lexicon: {len(st.session_state.lexicon):,} word-emotion rows.")
+        except Exception as exc:
+            st.error(str(exc))
+    if st.session_state.lexicon_is_nrc:
+        st.success("NRC lexicon loaded.")
     else:
-        findings = st.session_state.last_analysis["result"]["findings"]
-        if findings:
-            explain_df = pd.DataFrame(findings)
-            columns = [
-                "category", "matched_expression", "sentence",
-                "negation_flag", "interpretation",
-            ]
-            st.dataframe(
-                explain_df[columns],
-                use_container_width=True,
-                hide_index=True,
-            )
-            st.markdown("### Category counts")
-            counts = explain_df["category"].value_counts().rename_axis(
-                "Category"
-            ).to_frame("Occurrences")
-            st.bar_chart(counts)
-        else:
-            st.info("No current lexical rules were triggered.")
-
-    st.markdown("### Explanation boundary")
-    st.markdown(
-        """
-        - This version uses explicit lexical rules, so the triggering expression is visible.
-        - The negation detector is a local-window heuristic and can be wrong.
-        - A matched phrase is not proof of a patient's intention, emotion, or experience.
-        - The current rule-based module is not a trained or clinically validated AI model.
-        """
-    )
-
-# ============================================================
-# TAB 4 — HUMAN ANNOTATION
-# ============================================================
-
-with tabs[3]:
-    st.header("Human Annotation Workspace")
-    st.write(
-        "Create a small, transparent annotation record for the currently analysed text."
-    )
-
-    if st.session_state.last_analysis:
-        st.text_area(
-            "Narrative under review",
-            value=st.session_state.last_analysis["text"],
-            height=110,
-            disabled=True,
-            key="annotation_text_display",
+        st.warning(
+            "Using a small built-in demonstration word list, NOT the full NRC lexicon. "
+            "For a research analysis, upload the official NRC lexicon obtained under its terms."
         )
-
-        label = st.radio(
-            "Human assessment of communication-barrier evidence",
-            ["Positive", "Negative", "Uncertain"],
-            horizontal=True,
-            key="annotation_label",
-        )
-
-        category = st.selectbox(
-            "Primary research category",
-            ["Hesitation", "Fear and Anxiety", "Avoidance", "Self-Censorship",
-             "Power Imbalance", "Dismissal and Minimisation",
-             "Empathic Communication", "Patient Agency",
-             "Other / No clear category"],
-            key="annotation_category",
-        )
-
-        annotator_id = st.text_input(
-            "Pseudonymous annotator code",
-            placeholder="e.g. RATER_A (do not enter a real name)",
-        )
-        rationale = st.text_area(
-            "Evidence and rationale",
-            placeholder="Record the contextual evidence and explain uncertainty.",
-        )
-
-        if st.button("Save annotation", type="primary"):
-            st.session_state.annotation_records.append({
-                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                "text": st.session_state.last_analysis["text"],
-                "human_label": label,
-                "primary_category": category,
-                "annotator_code": annotator_id.strip() or "UNSPECIFIED",
-                "rationale": rationale,
-            })
-            st.success("Annotation added to this session.")
-
+    lookup = lexicon_lookup(st.session_state.lexicon)
+    text_choice = st.radio("Analysis source", ["Enter de-identified text", "Analyze loaded participant transcript"])
+    text = ""
+    if text_choice == "Enter de-identified text":
+        text = st.text_area("English text", height=180)
+    elif df is not None and not df.empty:
+        choices = df["participant_id"].astype(str).tolist()
+        selected_pid = st.selectbox("Participant ID", choices)
+        text = df.loc[df["participant_id"].astype(str) == selected_pid, "text"].iloc[0]
+        st.text_area("Selected participant text (preview)", text[:3000], height=150, disabled=True)
     else:
-        st.info("Run a text analysis before annotating.")
-
-    if st.session_state.annotation_records:
-        st.divider()
-        annotation_df = pd.DataFrame(st.session_state.annotation_records)
-        st.dataframe(annotation_df, use_container_width=True, hide_index=True)
+        st.info("Load a dataset first, or switch to manual text input.")
+    if st.button("Run lexical analysis", type="primary", disabled=not bool(text.strip())):
+        summary, matches = emotion_lexical_analysis(text, lookup)
+        tokens = re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?", text)
+        st.metric("Word tokens", len(tokens))
+        st.metric("Lexicon matches", len(matches))
+        st.subheader("Emotion-word association profile")
+        st.dataframe(summary, use_container_width=True, hide_index=True)
+        st.bar_chart(summary.set_index("emotion lexicon category")["matches per 1,000 tokens"])
+        if not matches.empty:
+            st.subheader("Matched lexical items")
+            st.dataframe(matches, use_container_width=True, hide_index=True)
         st.download_button(
-            "Export human annotations (CSV)",
-            dataframe_csv_bytes(annotation_df),
-            file_name="neurometric_human_annotations.csv",
+            "Download lexical analysis CSV",
+            summary.to_csv(index=False).encode("utf-8"),
+            file_name="nrc_lexical_emotion_summary.csv",
             mime="text/csv",
         )
+        st.caption(
+            "Negation, intensifier, and dampener columns are local-window heuristics. "
+            "They are not syntactic scope resolution and should not be interpreted as corrected emotion scores."
+        )
 
-# ============================================================
-# TAB 5 — RESEARCH VALIDATION
-# ============================================================
-
-with tabs[4]:
-    st.header("Empirical Validation Laboratory")
+elif page == "Internal validation":
+    st.header("Nested internal validation")
     st.write(
-        "Evaluate rule-based outputs against independently produced human labels."
+        "Runs nested StratifiedGroupKFold on the official training split (or all labelled "
+        "rows if a custom dataset has no official train split). The participant is the "
+        "grouping unit. Hyperparameter selection occurs only within outer training folds."
     )
-
-    st.info(
-        "A valid evaluation requires an appropriate sampling strategy, a pre-defined "
-        "annotation codebook, independent labels, and separation of development and test data."
-    )
-
-    uploaded_validation = st.file_uploader(
-        "Upload labelled CSV",
-        type=["csv"],
-        key="validation_upload",
-        help="Required columns: text, gold_label. Optional: rater_1, rater_2.",
-    )
-
-    if uploaded_validation is not None:
-        try:
-            validation_df = pd.read_csv(uploaded_validation)
-            st.subheader("Dataset preview")
-            st.dataframe(validation_df.head(15), use_container_width=True)
-
-            if "text" not in validation_df.columns or "gold_label" not in validation_df.columns:
-                st.error("Required columns are 'text' and 'gold_label'.")
-            else:
-                threshold = st.slider(
-                    "Minimum non-negated lexical matches for positive prediction",
-                    1, 8, 1, key="rule_threshold",
-                )
-
-                valid_rows = validation_df.dropna(subset=["text", "gold_label"]).copy()
-                valid_rows["gold_binary"] = valid_rows["gold_label"].apply(
-                    normalize_binary_label
-                )
-                valid_rows = valid_rows.dropna(subset=["gold_binary"])
-                valid_rows["gold_binary"] = valid_rows["gold_binary"].astype(int)
-                valid_rows["rule_prediction"] = valid_rows["text"].astype(str).apply(
-                    lambda text: document_to_prediction(text, threshold)
-                )
-
-                if len(valid_rows) == 0:
-                    st.warning("No valid binary gold labels found.")
-                else:
-                    y_true = valid_rows["gold_binary"].to_numpy()
-                    y_pred = valid_rows["rule_prediction"].to_numpy()
-
-                    if len(np.unique(y_true)) < 2:
-                        st.warning(
-                            "Both gold-label classes are required for meaningful "
-                            "binary classification metrics."
-                        )
-                    else:
-                        precision = precision_score(y_true, y_pred, zero_division=0)
-                        recall = recall_score(y_true, y_pred, zero_division=0)
-                        f1 = f1_score(y_true, y_pred, zero_division=0)
-                        accuracy = accuracy_score(y_true, y_pred)
-                        kappa = cohen_kappa_score(y_true, y_pred)
-                        ci_low, ci_high = bootstrap_f1_interval(y_true, y_pred)
-
-                        a, b, c, d, e = st.columns(5)
-                        a.metric("Precision", f"{precision:.3f}")
-                        b.metric("Recall", f"{recall:.3f}")
-                        c.metric("F1", f"{f1:.3f}")
-                        d.metric("Accuracy", f"{accuracy:.3f}")
-                        e.metric("Cohen's κ", f"{kappa:.3f}")
-
-                        if ci_low is not None:
-                            st.caption(
-                                f"Exploratory bootstrap 95% interval for F1: "
-                                f"{ci_low:.3f}–{ci_high:.3f}"
-                            )
-
-                        cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
-                        cm_df = pd.DataFrame(
-                            cm,
-                            index=["Actual negative", "Actual positive"],
-                            columns=["Predicted negative", "Predicted positive"],
-                        )
-                        st.subheader("Confusion matrix")
-                        st.dataframe(cm_df)
-
-                        st.subheader("Classification report")
-                        st.code(
-                            classification_report(
-                                y_true, y_pred, zero_division=0
-                            )
-                        )
-
-                    st.session_state.validation_results = valid_rows.copy()
-                    st.download_button(
-                        "Download rule-based validation results",
-                        dataframe_csv_bytes(valid_rows),
-                        file_name="rule_based_validation_results.csv",
-                        mime="text/csv",
-                    )
-
-                # Inter-rater reliability
-                if {"rater_1", "rater_2"}.issubset(validation_df.columns):
-                    st.divider()
-                    st.subheader("Inter-rater reliability")
-
-                    paired = validation_df[["rater_1", "rater_2"]].copy()
-                    paired["r1"] = paired["rater_1"].apply(normalize_binary_label)
-                    paired["r2"] = paired["rater_2"].apply(normalize_binary_label)
-                    paired = paired.dropna(subset=["r1", "r2"])
-
-                    if len(paired) >= 2:
-                        r1 = paired["r1"].astype(int).to_numpy()
-                        r2 = paired["r2"].astype(int).to_numpy()
-                        if len(np.unique(np.concatenate([r1, r2]))) > 1:
-                            kappa_raters = cohen_kappa_score(r1, r2)
-                            st.metric("Cohen's Kappa (raters)", f"{kappa_raters:.3f}")
-                        else:
-                            st.warning(
-                                "Cohen's Kappa is not informative when both raters "
-                                "use only one category."
-                            )
-                    else:
-                        st.warning("At least two complete paired annotations are required.")
-
-                # Multi-rater alpha
-                rater_columns = [
-                    column for column in validation_df.columns
-                    if re.fullmatch(r"rater_\d+", str(column))
-                ]
-                if len(rater_columns) >= 2:
-                    st.subheader("Krippendorff's Alpha (nominal)")
-                    rating_rows = []
-                    for _, row in validation_df[rater_columns].iterrows():
-                        rating_rows.append([
-                            normalize_binary_label(value)
-                            for value in row.tolist()
-                        ])
-                    alpha = krippendorff_alpha_nominal(rating_rows)
-                    if alpha is None:
-                        st.warning(
-                            "Alpha could not be calculated from the supplied ratings."
-                        )
-                    else:
-                        st.metric("Krippendorff's α", f"{alpha:.3f}")
-                        st.caption(
-                            "Calculated for nominal binary labels using available "
-                            "ratings. Interpret in light of prevalence, sample size, "
-                            "missingness, and annotation design."
-                        )
-
-        except Exception as exc:
-            st.error(f"Could not process the uploaded dataset: {exc}")
-
-    st.markdown("### Example CSV schema")
-    st.code(
-        "text,gold_label,rater_1,rater_2\n"
-        '"I was afraid to speak.",1,1,1\n'
-        '"I discussed my concerns.",0,0,0\n'
-        '"I did not feel afraid.",0,0,0',
-        language="csv",
-    )
-    st.caption("Illustrative schema only. These rows are not research evidence.")
-
-# ============================================================
-# TAB 6 — MODEL LABORATORY
-# ============================================================
-
-with tabs[5]:
-    st.header("Supervised Model Laboratory")
-    st.write(
-        "Train a TF-IDF + Logistic Regression baseline on your own independently "
-        "labelled dataset. This is separate from the lexicon-based rule engine."
-    )
-
-    st.warning(
-        "Use a dataset with a defensible annotation protocol. A random split is not "
-        "sufficient when records from the same participant, source, or conversation "
-        "could appear in both train and test sets. In that case, use group-based splitting."
-    )
-
-    model_file = st.file_uploader(
-        "Upload labelled training CSV",
-        type=["csv"],
-        key="model_upload",
-    )
-
-    if model_file is not None:
-        try:
-            model_df = pd.read_csv(model_file)
-            st.dataframe(model_df.head(10), use_container_width=True)
-
-            col_text, col_label = st.columns(2)
-            with col_text:
-                text_col = st.selectbox(
-                    "Text column",
-                    model_df.columns.tolist(),
-                    index=(model_df.columns.tolist().index("text")
-                           if "text" in model_df.columns else 0),
-                )
-            with col_label:
-                default_label_index = (
-                    model_df.columns.tolist().index("gold_label")
-                    if "gold_label" in model_df.columns else
-                    min(1, len(model_df.columns) - 1)
-                )
-                label_col = st.selectbox(
-                    "Gold-label column",
-                    model_df.columns.tolist(),
-                    index=default_label_index,
-                )
-
-            test_fraction = st.slider(
-                "Test set proportion",
-                min_value=0.20,
-                max_value=0.40,
-                value=0.25,
-                step=0.05,
-            )
-
-            if st.button("Train and evaluate baseline model", type="primary"):
-                with st.spinner("Training TF-IDF + Logistic Regression..."):
-                    trained = train_supervised_model(
-                        model_df,
-                        text_col,
-                        label_col,
-                        test_size=test_fraction,
-                    )
-                    st.session_state.trained_model = trained["model"]
-                    st.session_state.trained_model_info = {
-                        "metrics": trained["metrics"],
-                        "test_text": trained["test_text"],
-                        "y_test": trained["y_test"].tolist(),
-                        "predictions": trained["predictions"].tolist(),
-                        "feature_names": trained["feature_names"][:100].tolist(),
-                        "text_column": text_col,
-                        "label_column": label_col,
-                    }
-
-            if st.session_state.trained_model_info:
-                info = st.session_state.trained_model_info
-                metrics = info["metrics"]
-                st.divider()
-                st.subheader("Held-out test results")
-                a, b, c, d = st.columns(4)
-                a.metric("Precision", f"{metrics['precision']:.3f}")
-                b.metric("Recall", f"{metrics['recall']:.3f}")
-                c.metric("F1", f"{metrics['f1']:.3f}")
-                d.metric("Accuracy", f"{metrics['accuracy']:.3f}")
-
-                st.caption(
-                    f"Records: {metrics['n_total']} total · "
-                    f"{metrics['n_train']} train · {metrics['n_test']} test"
-                )
-
-                ci = metrics["f1_bootstrap_95ci"]
-                if ci[0] is not None:
-                    st.caption(f"Bootstrap 95% F1 interval: {ci[0]:.3f}–{ci[1]:.3f}")
-
-                cm = pd.DataFrame(
-                    metrics["confusion_matrix"],
-                    index=["Actual negative", "Actual positive"],
-                    columns=["Predicted negative", "Predicted positive"],
-                )
-                st.subheader("Confusion matrix")
-                st.dataframe(cm)
-
-                st.subheader("Most influential positive/negative linear features")
-                classifier = st.session_state.trained_model.named_steps["classifier"]
-                vectorizer = st.session_state.trained_model.named_steps["tfidf"]
-                feature_names = vectorizer.get_feature_names_out()
-                coefficients = classifier.coef_[0]
-                feature_table = pd.DataFrame({
-                    "term": feature_names,
-                    "coefficient": coefficients,
-                }).sort_values("coefficient", ascending=False)
-
-                left, right = st.columns(2)
-                with left:
-                    st.write("Higher positive-class coefficients")
-                    st.dataframe(feature_table.head(15), hide_index=True)
-                with right:
-                    st.write("Higher negative-class coefficients")
-                    st.dataframe(
-                        feature_table.tail(15).sort_values("coefficient"),
-                        hide_index=True,
-                    )
-
-                st.caption(
-                    "Linear coefficients describe associations in this fitted model. "
-                    "They are not causal explanations and may reflect dataset artefacts."
-                )
-
-                st.download_button(
-                    "Download model evaluation summary",
-                    json_bytes(metrics),
-                    file_name="model_evaluation_summary.json",
-                    mime="application/json",
-                )
-
-                st.subheader("Try a new anonymised text")
-                prediction_text = st.text_area(
-                    "New text for the trained baseline",
-                    key="model_prediction_input",
-                    height=100,
-                )
-                if st.button("Predict with trained baseline"):
-                    if prediction_text.strip():
-                        model = st.session_state.trained_model
-                        predicted = int(model.predict([prediction_text])[0])
-                        probabilities = model.predict_proba([prediction_text])[0]
-                        class_order = list(model.classes_)
-                        probability_map = {
-                            str(cls): float(prob)
-                            for cls, prob in zip(class_order, probabilities)
-                        }
-                        st.write(
-                            "Model output:",
-                            "Positive class" if predicted == 1 else "Negative class",
-                        )
-                        st.json({
-                            "predicted_class": predicted,
-                            "class_probabilities": probability_map,
-                            "warning": (
-                                "Model probabilities are not calibrated clinical "
-                                "probabilities and must not be interpreted as an "
-                                "individual's psychological state."
-                            ),
-                        })
-
-        except Exception as exc:
-            st.error(f"Model training failed: {exc}")
-
+    if df is None or df.empty:
+        st.info("Load a dataset first.")
     else:
-        st.info(
-            "Upload a CSV with text and binary gold_label columns to train a baseline. "
-            "The platform does not ship with a fabricated pretrained clinical model."
-        )
-
-# ============================================================
-# TAB 7 — NARRATIVE COMPARISON
-# ============================================================
-
-with tabs[6]:
-    st.header("Narrative Comparison Laboratory")
-    st.write(
-        "Compare two anonymised narratives using transparent lexical counts. "
-        "This is descriptive comparison, not a test of which patient is more distressed."
-    )
-
-    left_text = st.text_area(
-        "Narrative A",
-        "I wanted to explain my symptoms, but I hesitated.",
-        height=130,
-        key="comparison_a",
-    )
-    right_text = st.text_area(
-        "Narrative B",
-        "I explained my concerns and asked the doctor several questions.",
-        height=130,
-        key="comparison_b",
-    )
-
-    if st.button("Compare narratives", type="primary"):
-        if not left_text.strip() or not right_text.strip():
-            st.error("Enter both narratives.")
+        if "official_split" in df and (df["official_split"].astype(str).str.lower() == "train").any():
+            model_data = df[df["official_split"].astype(str).str.lower() == "train"].copy()
         else:
-            a_result = analyze_document(left_text)
-            b_result = analyze_document(right_text)
-            a_metrics = calculate_descriptive_indicators(
-                left_text, a_result["findings"]
+            model_data = df.copy()
+        st.write(f"Records available for internal CV: {len(model_data.dropna(subset=['PHQ8_Binary']))}")
+        if st.button("Run nested group cross-validation", type="primary"):
+            try:
+                with st.spinner("Running nested group-aware model validation..."):
+                    result = nested_group_cv(model_data)
+                st.session_state.cv_result = result
+                st.success("Nested validation completed.")
+            except Exception as exc:
+                st.session_state.cv_result = None
+                st.error(str(exc))
+        result = st.session_state.cv_result
+        if result is not None:
+            m = result["metrics"]
+            c = st.columns(4)
+            c[0].metric("Macro F1", f"{m['macro_f1']:.3f}")
+            c[1].metric("Balanced accuracy", f"{m['balanced_accuracy']:.3f}")
+            c[2].metric("ROC AUC", f"{m.get('roc_auc', float('nan')):.3f}")
+            c[3].metric("Participants", m["n"])
+            st.subheader("Class-specific metrics")
+            st.json(m)
+            st.subheader("Confusion matrix")
+            st.dataframe(
+                pd.DataFrame(
+                    confusion_matrix(result["truth"], result["pred"], labels=[0, 1]),
+                    index=["Observed 0", "Observed 1"],
+                    columns=["Predicted 0", "Predicted 1"],
+                )
             )
-            b_metrics = calculate_descriptive_indicators(
-                right_text, b_result["findings"]
-            )
-
-            comparison = pd.DataFrame([
-                {
-                    "Narrative": "A",
-                    "Words": a_metrics["word_count"],
-                    "Lexical matches": a_metrics["total_matches"],
-                    "Negation flags": a_metrics["negated_matches"],
-                    "Matches per 100 words": a_metrics["marker_density_per_100_words"],
-                },
-                {
-                    "Narrative": "B",
-                    "Words": b_metrics["word_count"],
-                    "Lexical matches": b_metrics["total_matches"],
-                    "Negation flags": b_metrics["negated_matches"],
-                    "Matches per 100 words": b_metrics["marker_density_per_100_words"],
-                },
-            ])
-            st.dataframe(comparison, use_container_width=True, hide_index=True)
-
-            category_union = sorted(
-                set(a_metrics["category_distribution"])
-                | set(b_metrics["category_distribution"])
-            )
-            if category_union:
-                cat_compare = pd.DataFrame({
-                    "Narrative A": [
-                        a_metrics["category_distribution"].get(cat, 0)
-                        for cat in category_union
-                    ],
-                    "Narrative B": [
-                        b_metrics["category_distribution"].get(cat, 0)
-                        for cat in category_union
-                    ],
-                }, index=category_union)
-                st.bar_chart(cat_compare)
-
-            st.caption(
-                "Differences may reflect text length, vocabulary, context, language, "
-                "or lexicon coverage. They do not establish differences in actual "
-                "patient experience or communication quality."
-            )
-
-# ============================================================
-# TAB 8 — REPORTS AND EXPORTS
-# ============================================================
-
-with tabs[7]:
-    st.header("Research Reports & Reproducibility")
-
-    if st.session_state.last_analysis:
-        current = st.session_state.last_analysis
-        report_text = make_research_report(current)
-
-        st.subheader("Current analysis report")
-        st.download_button(
-            "Download Markdown research report",
-            data=report_text.encode("utf-8"),
-            file_name="neurometric_exploratory_report.md",
-            mime="text/markdown",
-        )
-
-        export_payload = {
-            "project": PROJECT_NAME,
-            "version": APP_VERSION,
-            "generated_utc": datetime.now(timezone.utc).isoformat(),
-            "analysis": current,
-            "interpretation_notice": (
-                "Exploratory lexical analysis only; not a clinical assessment."
-            ),
-        }
-        st.download_button(
-            "Download analysis as JSON",
-            data=json_bytes(export_payload),
-            file_name="neurometric_analysis.json",
-            mime="application/json",
-        )
-
-        findings_df = pd.DataFrame(current["result"]["findings"])
-        if not findings_df.empty:
+            st.subheader("Outer fold details")
+            st.dataframe(result["fold_table"], use_container_width=True, hide_index=True)
+            if st.button("Calculate participant-level bootstrap interval"):
+                try:
+                    st.session_state.cv_ci = bootstrap_ci(result["truth"], result["pred"])
+                except Exception as exc:
+                    st.error(str(exc))
+            if "cv_ci" in st.session_state:
+                st.json(st.session_state.cv_ci)
+            oof = pd.DataFrame({
+                "participant_id": result["data"]["participant_id"].to_numpy(),
+                "PHQ8_Binary_reference": result["truth"],
+                "prediction": result["pred"],
+                "predicted_probability_class_1": result["prob"],
+                "outer_fold": result["fold_ids"],
+            })
             st.download_button(
-                "Download detected markers as CSV",
-                dataframe_csv_bytes(findings_df),
-                file_name="neurometric_detected_markers.csv",
+                "Download out-of-fold predictions",
+                oof.to_csv(index=False).encode("utf-8"),
+                file_name="daic_nested_cv_oof_predictions.csv",
                 mime="text/csv",
             )
-    else:
-        st.info("Run a text analysis to generate a report.")
+            st.caption(
+                "The sample is small. Confidence intervals may be wide, and nested CV "
+                "does not replace an independent external cohort."
+            )
 
-    st.divider()
-    st.subheader("Session analysis history")
-    if st.session_state.analysis_history:
-        history_df = pd.DataFrame(st.session_state.analysis_history)
-        st.dataframe(history_df, use_container_width=True, hide_index=True)
-        st.download_button(
-            "Export session history",
-            dataframe_csv_bytes(history_df),
-            file_name="neurometric_session_history.csv",
-            mime="text/csv",
-        )
-    else:
-        st.caption("No analyses recorded in this session.")
-
-    st.divider()
-    st.subheader("Environment information")
-    environment = {
-        "application_version": APP_VERSION,
-        "python_version": platform.python_version(),
-        "platform": platform.platform(),
-        "analysis_timestamp_utc": datetime.now(timezone.utc).isoformat(),
-        "random_seed": 42,
-    }
-    st.json(environment)
-    st.download_button(
-        "Export environment metadata",
-        json_bytes(environment),
-        file_name="neurometric_environment.json",
-        mime="application/json",
+elif page == "Official development evaluation":
+    st.header("Official development split evaluation")
+    st.write(
+        "This module trains on the official DAIC-WOZ training split and evaluates on "
+        "the separately supplied official development split. Do not use development "
+        "results to repeatedly tune the model and then report them as untouched test results."
     )
+    if df is None or df.empty:
+        st.info("Load the official DAIC-WOZ archive first.")
+    else:
+        if st.button("Train on official train; evaluate on official dev", type="primary"):
+            try:
+                with st.spinner("Training and evaluating..."):
+                    result = train_on_official_train_evaluate_dev(df)
+                st.session_state.dev_result = result
+                st.success("Development evaluation completed.")
+            except Exception as exc:
+                st.session_state.dev_result = None
+                st.error(str(exc))
+        result = st.session_state.dev_result
+        if result is not None:
+            m = result["metrics"]
+            st.json(m)
+            st.dataframe(
+                pd.DataFrame(
+                    confusion_matrix(result["truth"], result["pred"], labels=[0, 1]),
+                    index=["Observed 0", "Observed 1"],
+                    columns=["Predicted 0", "Predicted 1"],
+                )
+            )
+            dev_predictions = pd.DataFrame({
+                "participant_id": result["dev"]["participant_id"].to_numpy(),
+                "PHQ8_Binary_reference": result["truth"],
+                "prediction": result["pred"],
+                "predicted_probability_class_1": result["prob"],
+            })
+            st.download_button(
+                "Download official dev predictions",
+                dev_predictions.to_csv(index=False).encode("utf-8"),
+                file_name="daic_official_dev_predictions.csv",
+                mime="text/csv",
+            )
+            st.warning(
+                "This is a held-out development evaluation, not the official test-set result. "
+                "If you use these results for model selection, they are no longer an untouched final test."
+            )
 
-# ============================================================
-# TAB 9 — METHODOLOGY AND ETHICS
-# ============================================================
+elif page == "Error analysis":
+    st.header("Qualitative error analysis")
+    result = st.session_state.cv_result
+    if result is None:
+        st.info("Run nested internal validation first.")
+    else:
+        data = result["data"].reset_index(drop=True)
+        errors = data.loc[result["truth"] != result["pred"], ["participant_id", "text", "PHQ8_Binary"]].copy()
+        errors["predicted_label"] = result["pred"][result["truth"] != result["pred"]]
+        st.write(f"Misclassified participants: {len(errors)} / {len(data)}")
+        if not errors.empty:
+            st.dataframe(errors[["participant_id", "PHQ8_Binary", "predicted_label"]], use_container_width=True)
+            st.download_button(
+                "Download error records (IDs and labels only)",
+                errors.drop(columns=["text"]).to_csv(index=False).encode("utf-8"),
+                file_name="error_analysis_metadata.csv",
+                mime="text/csv",
+            )
+        st.markdown("""
+        Review error patterns without exposing transcript text:
+        - lexical ambiguity and negation;
+        - interviewer prompts and context dependence;
+        - transcript omissions or ASR errors;
+        - participant-level differences and potential demographic confounding;
+        - label noise and PHQ-8 threshold effects;
+        - whether the model learns topic or interview structure rather than the intended construct.
+        
+        Avoid sharing identifiable or sensitive transcript excerpts in reports.
+        """)
 
-with tabs[8]:
-    st.header("Methodology, Theory & Ethics")
-
-    with st.expander("1. Narrative Medicine", expanded=True):
-        st.markdown(
-            """
-            Narrative Medicine examines how illness is experienced, narrated,
-            interpreted, and responded to. Rita Charon's work on narrative
-            competence is a relevant theoretical foundation. This platform
-            operationalises only selected linguistic features; it does not
-            claim to measure narrative competence or empathy in full.
-            """
-        )
-
-    with st.expander("2. The Clinical Gaze"):
-        st.markdown(
-            """
-            Michel Foucault's analysis of the clinical gaze can serve as a
-            critical lens for examining how institutional medical practices
-            privilege certain forms of knowledge. The software does not
-            computationally measure Foucauldian power relations; it explores
-            selected language patterns that researchers may interpret in context.
-            """
-        )
-
-    with st.expander("3. Explainable NLP"):
-        st.markdown(
-            """
-            The lexical module provides direct traceability by showing the
-            expression and rule that triggered a match. The TF-IDF model
-            provides inspectable linear coefficients. Neither form of
-            explanation proves that the model's interpretation is correct.
-            """
-        )
-
-    with st.expander("4. Validation protocol"):
-        st.markdown(
-            """
-            A defensible study should pre-register or document the research
-            question, inclusion criteria, sampling procedure, annotation
-            handbook, annotator training, adjudication process, data split,
-            primary metrics, and error analysis.
-
-            If several records come from the same participant, interview,
-            clinic, or source, split by group rather than randomly by row.
-            A held-out test set should not be used repeatedly for model tuning.
-            """
-        )
-
-    with st.expander("5. Ethical and privacy safeguards"):
-        st.markdown(
-            """
-            - Do not enter names, addresses, contact details, record numbers,
-              or other identifying information.
-            - Obtain appropriate consent and ethics review before collecting
-              or analysing human-subject narratives.
-            - Use data minimisation, access controls, retention limits, and
-              secure storage.
-            - Do not infer diagnosis, deception, trauma, mental state, or
-              treatment risk from lexical markers.
-            - Do not use outputs for triage, clinical decisions, or performance
-              assessment of individual clinicians or patients.
-            - Check applicable institutional and local data-protection rules.
-            """
-        )
-
-    with st.expander("6. Current limitations"):
-        st.markdown(
-            """
-            - The bilingual lexicon is manually defined and incomplete.
-            - Language identification is a heuristic.
-            - Negation handling is local and can misclassify scope.
-            - The sentence splitter is lightweight.
-            - Sarcasm, metaphor, code-switching, dialects, and pragmatic context
-              are not reliably handled.
-            - The supervised model is only as reliable as its training labels,
-              sampling, and evaluation design.
-            - No clinical validation has been performed by this application.
-            """
-        )
-
-    with st.expander("7. Proposed research extensions"):
-        st.markdown(
-            """
-            1. Develop and publish a versioned annotation codebook.
-            2. Build an ethically sourced, consented, de-identified corpus.
-            3. Include independent annotators and adjudication.
-            4. Compare lexicon, classical ML, and appropriately fine-tuned
-               multilingual transformer models.
-            5. Use participant- or source-level data splits.
-            6. Evaluate calibration, subgroup performance, robustness,
-               and out-of-domain generalisation.
-            7. Conduct qualitative review of disagreement cases.
-            8. Publish a model card, data statement, limitations, and
-               reproducible analysis scripts.
-            """
-        )
-
-    st.markdown("### Research integrity statement")
-    st.info(
-        "No empirical performance, reliability coefficient, clinical validity, "
-        "or statistical significance is claimed unless it is calculated from "
-        "appropriate, documented research data."
-    )
-
-# ============================================================
-# 11. FOOTER
-# ============================================================
+elif page == "Methodology and ethics":
+    st.header("Methodology and ethics")
+    st.subheader("Dataset provenance")
+    st.markdown("""
+    DAIC-WOZ is an access-controlled research corpus hosted by USC ICT. Its official
+    documentation describes 189 sessions, transcripts, participant audio/video,
+    and PHQ-8 metadata. Access is limited to academic and non-profit researchers
+    under the corpus's application and consent conditions.
+    
+    The official train and development label files contain participant IDs and PHQ-8
+    scores/binary labels. The standard official test label file contains participant
+    IDs and gender, but not PHQ-8 labels. Therefore, this app does not invent test labels.
+    """)
+    st.subheader("Construct validity")
+    st.markdown("""
+    - PHQ-8 Binary is a thresholded self-report questionnaire variable (the corpus documentation describes score >= 10).
+    - It is not a clinician's diagnosis.
+    - NRC word-emotion associations are lexical annotations, not a direct measurement of felt emotion.
+    - A relationship between word counts and PHQ-8 does not establish causal or diagnostic meaning.
+    """)
+    st.subheader("Recommended analysis plan")
+    st.markdown("""
+    1. Pre-register the research question, unit of analysis, outcomes, exclusions, and metrics.
+    2. Use participant as the independent grouping unit.
+    3. Keep the official development split separate from training.
+    4. Use nested, group-aware cross-validation only within the training split for internal model selection.
+    5. Report macro F1, balanced accuracy, class-specific precision/recall, ROC AUC, confusion matrix, and uncertainty.
+    6. Compare a majority-class baseline and a simple TF-IDF baseline.
+    7. Treat lexical emotion analysis as exploratory; report raw counts and normalized rates.
+    8. Seek an independent external cohort before making generalisability claims.
+    9. Conduct subgroup/error analysis only where sample sizes support responsible interpretation.
+    10. Follow institutional ethics, data-use agreements, and disclosure rules.
+    """)
+    st.subheader("Reporting guidance")
+    st.markdown("""
+    - TRIPOD+AI: reporting prediction model studies.
+    - PROBAST+AI: risk of bias and applicability.
+    - DAIC-WOZ corpus paper and official documentation: dataset provenance and field definitions.
+    - NRC Emotion Lexicon paper and documentation: lexical association resource and limitations.
+    """)
+    st.subheader("Checklist")
+    for item in [
+        "I have formal permission to use this dataset.",
+        "The data were obtained from the official source.",
+        "I have not redistributed the dataset.",
+        "The unit of analysis is participant-level.",
+        "No participant appears in both training and evaluation groups.",
+        "The official development split was not used for repeated tuning.",
+        "PHQ-8 is described as self-reported symptom severity, not diagnosis.",
+        "Emotion lexicon outputs are described as lexical associations, not felt emotions.",
+        "No identifiable transcript text is included in public reports.",
+    ]:
+        st.checkbox(item, key="eth_" + str(abs(hash(item))))
 
 st.divider()
-st.markdown(
-    f"""
-    <div style="text-align:center; color:#64748B; padding:14px;">
-        <strong>{PROJECT_NAME}</strong><br>
-        {PROJECT_SUBTITLE}<br>
-        <small>Version {APP_VERSION} · Experimental research software · Not a medical device</small>
-    </div>
-    """,
-    unsafe_allow_html=True,
+st.caption(
+    "The Neurometric Gaze | Research prototype. Outputs are exploratory and must not "
+    "be used for diagnosis, triage, treatment, or individual clinical decisions."
 )
+'''
+
+req = """streamlit>=1.36,<2.0
+pandas>=2.1,<3.0
+numpy>=1.26,<3.0
+scikit-learn>=1.4,<2.0
+"""
+
+(base / "app.py").write_text(app, encoding="utf-8")
+(base / "requirements.txt").write_text(req, encoding="utf-8")
+py_compile.compile(str(base / "app.py"), doraise=True)
+
+zip_path = Path("/mnt/data/neurometric_gaze_daic_research_project.zip")
+with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+    z.write(base / "app.py", "app.py")
+    z.write(base / "requirements.txt", "requirements.txt")
+
+print("Created:", base / "app.py")
+print("Lines:", len(app.splitlines()))
+print("Python syntax compilation: PASSED")
+print("Created ZIP:", zip_path)
