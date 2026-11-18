@@ -1,10 +1,4 @@
-from pathlib import Path
-import py_compile, zipfile, textwrap, os, json
-
-base = Path("/mnt/data/neurometric_gaze_daic")
-base.mkdir(parents=True, exist_ok=True)
-
-app = r'''"""
+"""
 THE NEUROMETRIC GAZE — Clinical Communication Research Edition
 
 Dataset target:
@@ -40,6 +34,7 @@ import json
 import math
 import zipfile
 import hashlib
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -61,6 +56,10 @@ from sklearn.calibration import calibration_curve
 from sklearn.utils import check_random_state
 
 APP_NAME = "The Neurometric Gaze"
+# Streamlit Cloud source directories may be read-only. Keep any runtime files
+# in the system temporary directory, never beside app.py.
+RUNTIME_DIR = Path(tempfile.gettempdir()) / "neurometric_gaze"
+RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 SEED = 42
 EMOTIONS = ["anger", "anticipation", "disgust", "fear",
             "joy", "sadness", "surprise", "trust"]
@@ -578,7 +577,7 @@ if page == "Research overview":
     - **Lexical emotion association:** counts words associated with eight emotion categories.
     - **PHQ-8 score:** participant-reported depressive symptom severity on a questionnaire.
     - **Model prediction:** a statistical estimate learned from the supplied development labels.
-    
+
     These are not interchangeable. A word associated with fear does not prove fear;
     a PHQ-8 score is not a clinical diagnosis; predictive performance does not establish causation.
     """)
@@ -843,7 +842,7 @@ elif page == "Error analysis":
         - participant-level differences and potential demographic confounding;
         - label noise and PHQ-8 threshold effects;
         - whether the model learns topic or interview structure rather than the intended construct.
-        
+
         Avoid sharing identifiable or sensitive transcript excerpts in reports.
         """)
 
@@ -855,7 +854,7 @@ elif page == "Methodology and ethics":
     documentation describes 189 sessions, transcripts, participant audio/video,
     and PHQ-8 metadata. Access is limited to academic and non-profit researchers
     under the corpus's application and consent conditions.
-    
+
     The official train and development label files contain participant IDs and PHQ-8
     scores/binary labels. The standard official test label file contains participant
     IDs and gender, but not PHQ-8 labels. Therefore, this app does not invent test labels.
@@ -906,24 +905,3 @@ st.caption(
     "The Neurometric Gaze | Research prototype. Outputs are exploratory and must not "
     "be used for diagnosis, triage, treatment, or individual clinical decisions."
 )
-'''
-
-req = """streamlit>=1.36,<2.0
-pandas>=2.1,<3.0
-numpy>=1.26,<3.0
-scikit-learn>=1.4,<2.0
-"""
-
-(base / "app.py").write_text(app, encoding="utf-8")
-(base / "requirements.txt").write_text(req, encoding="utf-8")
-py_compile.compile(str(base / "app.py"), doraise=True)
-
-zip_path = Path("/mnt/data/neurometric_gaze_daic_research_project.zip")
-with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-    z.write(base / "app.py", "app.py")
-    z.write(base / "requirements.txt", "requirements.txt")
-
-print("Created:", base / "app.py")
-print("Lines:", len(app.splitlines()))
-print("Python syntax compilation: PASSED")
-print("Created ZIP:", zip_path)
