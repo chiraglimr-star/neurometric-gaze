@@ -1,6 +1,4 @@
-from pathlib import Path
-
-code = r'''"""
+"""
 THE NEUROMETRIC GAZE 3.0
 Advanced Computational Narrative Medicine Research Prototype
 
@@ -19,6 +17,8 @@ import json
 import re
 import hashlib
 import platform
+import tempfile
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from collections import Counter
@@ -45,7 +45,33 @@ from sklearn.metrics import (
 # 1. CONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.0.1"
+
+
+def get_writable_output_dir() -> Optional[Path]:
+    """Return a writable runtime directory without writing into the app source.
+
+    Streamlit Cloud mounts the repository under /mount/src, which is commonly
+    read-only. Use the platform temporary directory first and fail gracefully
+    if the runtime does not permit filesystem writes.
+    """
+    candidates = [
+        Path(tempfile.gettempdir()) / "neurometric_gaze",
+        Path.home() / ".cache" / "neurometric_gaze",
+    ]
+    for candidate in candidates:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            probe = candidate / ".write_test"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            return candidate
+        except (OSError, PermissionError):
+            continue
+    return None
+
+
+OUTPUT_DIR = get_writable_output_dir()
 PROJECT_NAME = "The Neurometric Gaze"
 PROJECT_SUBTITLE = (
     "Computational Narrative Medicine & Patient–Physician "
@@ -1552,19 +1578,3 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-'''
-
-requirements = """streamlit>=1.40
-pandas>=2.2
-numpy>=1.26
-scikit-learn>=1.5
-"""
-
-out_dir = Path("/mnt/data/neurometric_gaze_3")
-out_dir.mkdir(parents=True, exist_ok=True)
-(out_dir / "app.py").write_text(code, encoding="utf-8")
-(out_dir / "requirements.txt").write_text(requirements, encoding="utf-8")
-
-print(f"Created: {out_dir / 'app.py'}")
-print(f"Code lines: {len(code.splitlines())}")
-print(f"Created: {out_dir / 'requirements.txt'}")
