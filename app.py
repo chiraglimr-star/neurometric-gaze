@@ -1,1514 +1,1572 @@
 """
-THE NEUROMETRIC GAZE — BEYOND THE UNHEARD
-Interdisciplinary Research & Media Platform for Narrative Medicine,
-Psychological Discourse Analysis, Stigma, and Public Health Communication.
+THE NEUROMETRIC GAZE — Beyond the Unheard
+=========================================================================
+A research and methodological prototype on the influence of media narratives
+on mental health stigma, literacy, and help-seeking intentions among young
+adults in Azerbaijan.
 
-SCIENTIFIC & ETHICAL INTEGRITY STATEMENT:
-- This application is a research and educational prototype.
-- It is NOT a clinical diagnostic, psychiatric, or screening instrument.
-- It does NOT compute fabricated psychometric scores, clinical risk scores,
-  or synthetic p-values / inter-rater reliability coefficients.
-- Lexical and thematic indicators reflect observed text characteristics in the
-  supplied dataset and do not directly measure internal emotions, clinical
-  diagnosis, acoustic silence, or individual mental health status.
-- Always use only data for which you hold lawful authorization, ethical
-  approval, and informed consent where applicable.
+Research question
+-----------------
+How do media narratives influence mental health stigma, social attitudes, and
+help-seeking intentions among young adults in Azerbaijan, and can evidence-
+based storytelling improve these outcomes?
+
+Scientific honesty statement
+----------------------------
+Every empirical number in this application is SYNTHETIC / ILLUSTRATIVE and is
+labeled as such. No real participants have been recruited at the time of this
+prototype. Real findings require ethical approval and data collection.
+
+Design principles
+-----------------
+1. Use only validated instruments (ATMHPS-AZ, RIBS, PSOSH, MHSAS, MHLS).
+2. Never claim diagnosis. Never use PHQ-8 as a central feature.
+3. Never fabricate clinical indices (e.g., "silence_index") without validation.
+4. Report N, effect size, and 95% CI alongside every statistical claim.
+5. Distinguish preprints from peer-reviewed sources.
+6. Anonymity, informed consent, and data minimization are non-negotiable.
 """
 
 from __future__ import annotations
 
-import hashlib
-import io
-import json
 import math
-import re
-import warnings
-import zipfile
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime
+from typing import Iterable, Sequence
 
 import numpy as np
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
+from scipy import stats
 
-try:
-    from scipy import stats as scipy_stats
-    HAS_SCIPY = True
-except Exception:
-    scipy_stats = None
-    HAS_SCIPY = False
-
-try:
-    from sklearn.dummy import DummyClassifier
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import (
-        accuracy_score,
-        average_precision_score,
-        balanced_accuracy_score,
-        brier_score_loss,
-        classification_report,
-        confusion_matrix,
-        f1_score,
-        roc_auc_score,
-    )
-    from sklearn.model_selection import StratifiedKFold, cross_val_predict
-    from sklearn.pipeline import FeatureUnion, Pipeline
-    HAS_SKLEARN = True
-except Exception:
-    HAS_SKLEARN = False
-
-warnings.filterwarnings("ignore", category=FutureWarning)
-
-# =====================================================================
-# 1. APPLICATION & EDITORIAL DESIGN CONFIGURATION
-# =====================================================================
+# =============================================================================
+# 1. PAGE CONFIGURATION AND BRAND TOKENS
+# =============================================================================
 
 st.set_page_config(
     page_title="The Neurometric Gaze — Beyond the Unheard",
-    page_icon="◈",
+    page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-EDITORIAL_CSS = """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600;700&display=swap');
-
-.stApp {
-    background-color: #F5F2EB;
-    color: #14243A;
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+BRAND = {
+    "ivory": "#F5F2EB",
+    "navy": "#14243A",
+    "teal": "#5C8581",
+    "amber": "#D6A56C",
+    "muted": "#EBE6DC",
+    "danger": "#B85450",
+    "success": "#5C8581",
+    "warn": "#D6A56C",
 }
 
-.block-container {
-    padding-top: 2.0rem;
-    padding-bottom: 4.0rem;
-    max-width: 1280px;
-}
+RNG_SEED = 20260218
 
-h1, h2, h3 {
-    font-family: 'Instrument Serif', Georgia, serif;
-    color: #14243A;
-    font-weight: 400;
-    letter-spacing: -0.3px;
-}
 
-h1 {
-    font-size: 3.15rem;
-    line-height: 1.06;
-    margin-bottom: 0.4rem;
-}
+# =============================================================================
+# 2. GLOBAL CSS (editorial design system)
+# =============================================================================
 
-h2 {
-    font-size: 2.05rem;
-    line-height: 1.15;
-    margin-top: 0.35rem;
-    margin-bottom: 0.65rem;
-}
-
-h3 {
-    font-size: 1.45rem;
-    line-height: 1.25;
-}
-
-p, li, label, .stMarkdown {
-    color: #1E314B;
-}
-
-[data-testid="stSidebar"] {
-    background-color: #ECE7DC;
-    border-right: 1px solid rgba(20, 36, 58, 0.14);
-}
-
-div[data-testid="stMetric"] {
-    background-color: #FFFFFF;
-    border: 1px solid rgba(20, 36, 58, 0.13);
-    border-top: 3px solid #5C8581;
-    padding: 15px 18px;
-    border-radius: 10px;
-}
-
-div[data-testid="stMetric"] label {
-    color: #485C76 !important;
-    font-size: 0.82rem !important;
-}
-
-div[data-testid="stMetric"] [data-testid="stMetricValue"] {
-    color: #14243A !important;
-    font-weight: 600 !important;
-}
-
-.kicker {
-    text-transform: uppercase;
-    letter-spacing: 0.14em;
-    font-size: 0.76rem;
-    font-weight: 700;
-    color: #5C8581;
-    margin-bottom: 0.35rem;
-}
-
-.scholar-card {
-    background-color: #FFFFFF;
-    border: 1px solid rgba(20, 36, 58, 0.13);
-    border-left: 4px solid #D6A56C;
-    border-radius: 10px;
-    padding: 1.2rem 1.4rem;
-    margin-bottom: 1.0rem;
-}
-
-.teal-card {
-    background-color: #FFFFFF;
-    border: 1px solid rgba(20, 36, 58, 0.13);
-    border-left: 4px solid #5C8581;
-    border-radius: 10px;
-    padding: 1.2rem 1.4rem;
-    margin-bottom: 1.0rem;
-}
-
-.pull-quote {
-    background-color: #EFECE4;
-    border-left: 4px solid #14243A;
-    padding: 0.95rem 1.25rem;
-    border-radius: 0 8px 8px 0;
-    font-style: italic;
-    color: #14243A;
-    margin: 0.75rem 0 1.0rem 0;
-}
-
-.badge {
-    display: inline-block;
-    background-color: rgba(92, 133, 129, 0.14);
-    color: #14243A;
-    border: 1px solid rgba(92, 133, 129, 0.35);
-    border-radius: 999px;
-    padding: 0.18rem 0.65rem;
-    font-size: 0.76rem;
-    font-weight: 600;
-    margin-right: 0.35rem;
-    margin-bottom: 0.35rem;
-}
-
-.amber-badge {
-    display: inline-block;
-    background-color: rgba(214, 165, 108, 0.22);
-    color: #14243A;
-    border: 1px solid rgba(214, 165, 108, 0.55);
-    border-radius: 999px;
-    padding: 0.18rem 0.65rem;
-    font-size: 0.76rem;
-    font-weight: 600;
-    margin-right: 0.35rem;
-    margin-bottom: 0.35rem;
-}
-</style>
-"""
-
-st.markdown(EDITORIAL_CSS, unsafe_allow_html=True)
-
-# =====================================================================
-# 2. VERIFIED PSYCHOLOGICAL & COMMUNICATION FRAMEWORKS
-# =====================================================================
-
-PSYCHOLOGICAL_FRAMEWORKS: List[Dict[str, Any]] = [
-    {
-        "id": "narrative_medicine",
-        "title": "Narrative Medicine & Illness Accounts",
-        "theorists": "Rita Charon (2006); Arthur Kleinman (1988)",
-        "core_premise": (
-            "Distinguishes between disease (biomedical pathology) and illness "
-            "(the lived human experience of suffering, meaning-making, and silence). "
-            "Attentive reading of narratives examines what is voiced, what is "
-            "hesitated over, and how patients situate themselves in care settings."
-        ),
-        "text_application": (
-            "Tracks first-person positioning, hedging/uncertainty phrasing, and "
-            "expressions of non-disclosure or restraint in narratives without "
-            "treating text markers as clinical diagnoses."
-        ),
-        "limitation": (
-            "Written transcripts lack prosody, facial cues, eye gaze, and "
-            "interactional timing; narrative themes do not verify clinical pathology."
-        ),
-    },
-    {
-        "id": "self_determination",
-        "title": "Self-Determination Theory (SDT)",
-        "theorists": "Edward L. Deci & Richard M. Ryan (1985, 2000)",
-        "core_premise": (
-            "Posits three basic psychological needs—autonomy (volition and "
-            "self-endorsement), competence (perceived capability and mastery), and "
-            "relatedness (connection, belonging, and being understood)—that "
-            "support psychological functioning and engagement."
-        ),
-        "text_application": (
-            "Examines explicit language around choice/constraint (autonomy), "
-            "coping/capability/helplessness (competence), and connection/isolation "
-            "or being heard/dismissed (relatedness)."
-        ),
-        "limitation": (
-            "Keyword/lexicon counts are descriptive indicators of topic mention, "
-            "not validated psychometric scales of need satisfaction."
-        ),
-    },
-    {
-        "id": "stigma_help_seeking",
-        "title": "Mental Health Stigma & Help-Seeking Frameworks",
-        "theorists": "Patrick W. Corrigan (2004); Sara Clement et al. (2015); Graham Thornicroft",
-        "core_premise": (
-            "Differentiates public stigma (stereotypes, prejudice, and "
-            "discrimination held by others) from self-stigma (internalization of "
-            "devaluing beliefs such as shame or perceived weakness), both of which "
-            "can impede help-seeking."
-        ),
-        "text_application": (
-            "Identifies explicit mentions of judgment, shame, secrecy, fear of "
-            "being labeled, and care-seeking or avoidance in narratives and "
-            "media texts."
-        ),
-        "limitation": (
-            "Attitudes and intentions reported in surveys or interviews do not "
-            "guarantee future behavioral help-seeking."
-        ),
-    },
-    {
-        "id": "social_cognitive",
-        "title": "Social Cognitive Theory & Media Modeling",
-        "theorists": "Albert Bandura (1986, 2001)",
-        "core_premise": (
-            "Explains human adaptation through triadic reciprocal causation "
-            "(personal factors, behavior, and environment), emphasizing perceived "
-            "self-efficacy and symbolic modeling through mass and digital media."
-        ),
-        "text_application": (
-            "Evaluates how media stories model realistic coping, agency, and "
-            "support pathways versus fatalism, sensationalism, or avoidance."
-        ),
-        "limitation": (
-            "Media exposure interacts with cultural, socioeconomic, and "
-            "interpersonal contexts; media framing alone is not a sole cause."
-        ),
-    },
-    {
-        "id": "framing_dramaturgy",
-        "title": "Media Framing & Dramaturgical Analysis",
-        "theorists": "Robert M. Entman (1993); Erving Goffman (1959)",
-        "core_premise": (
-            "Framing selects and makes salient certain aspects of a perceived "
-            "reality to define problems, diagnose causes, make moral judgments, "
-            "and suggest remedies. Goffman's dramaturgy highlights front-stage "
-            "presentation versus back-stage restraint."
-        ),
-        "text_application": (
-            "Structures qualitative/quantitative coding of how public narratives "
-            "and personal accounts manage impressions, disclosure, and concealment."
-        ),
-        "limitation": (
-            "Requires transparent codebooks and independent human inter-rater "
-            "agreement checks to avoid analyst confirmation bias."
-        ),
-    },
-    {
-        "id": "cognitive_affective_nlp",
-        "title": "Affective, Cognitive & Function-Word Linguistics",
-        "theorists": "James W. Pennebaker et al. (2003, 2015) — Linguistic Inquiry Tradition",
-        "core_premise": (
-            "Shows that pronoun usage, negation, tentativeness, and affective "
-            "words correlate modestly in empirical studies with attentional focus, "
-            "cognitive processing, and social orientation."
-        ),
-        "text_application": (
-            "Computes transparent token proportions (first-person singular, "
-            "negation/restraint terms, tentative/hedging markers, affective words) "
-            "with explicit sample-size and non-diagnostic caveats."
-        ),
-        "limitation": (
-            "Effect sizes in language-psychopathology research are typically small "
-            "to moderate and vary across languages, genres, and samples."
-        ),
-    },
-]
-
-# Transparent, auditable lexical categories (English + Azerbaijani tokens)
-# Used purely for descriptive text exploration—never for clinical diagnosis.
-LEXICON_CATEGORIES: Dict[str, List[str]] = {
-    "first_person_singular": [
-        "i", "me", "my", "mine", "myself",
-        "mən", "məni", "mənə", "mənim", "məndə", "məndən", "özüm", "özümü", "özümə"
-    ],
-    "restraint_and_non_disclosure": [
-        "quiet", "silent", "silence", "hid", "hide", "hidden", "held", "hold",
-        "withheld", "hesitate", "hesitated", "hesitation", "reluctant", "avoid",
-        "avoided", "avoidance", "downplay", "brush", "unspoken", "secret",
-        "susdum", "sükut", "gizlətdim", "gizli", "çəkindim", "deyəmədim", "demədim",
-        "saxladım", "qaçındım", "tərəddüd", "daxilimdə"
-    ],
-    "stigma_and_judgment": [
-        "stigma", "stigmatized", "shame", "ashamed", "embarrassed", "embarrassment",
-        "weak", "weakness", "judge", "judged", "judgment", "label", "labeled",
-        "taboo", "whispered", "mock", "dramatic",
-        "damğa", "damğalanma", "utanmaq", "utandım", "ayıb", "zəif", "zəiflik",
-        "qınaq", "qınamaq", "mühakimə", "tabu", "gülünc"
-    ],
-    "help_seeking_and_care": [
-        "help", "counselor", "therapist", "therapy", "support", "talk", "shared",
-        "openly", "listen", "listened", "care", "reach", "ask", "advice",
-        "kömək", "dəstək", "psixoloq", "həkim", "danışmaq", "bölüşmək",
-        "dinləmək", "müraciət", "qayğı"
-    ],
-    "tentative_and_hedging": [
-        "maybe", "perhaps", "might", "seem", "seems", "seemed", "sort", "kind",
-        "probably", "unsure", "uncertain", "sometimes", "often",
-        "bəlkə", "ola", "bilər", "deyəsən", "elə", "gəlir", "bilmirəm",
-        "əmin", "deyiləm", "bəzən", "tez-tez"
-    ],
-    "sdt_autonomy_competence_relatedness": [
-        "choice", "choose", "forced", "pressure", "control", "capable", "able",
-        "coping", "alone", "lonely", "connected", "belong", "understood", "heard",
-        "seçim", "məcbur", "təzyiq", "nəzarət", "bacarmaq", "tək", "tənha",
-        "bağlılıq", "anlaşılan", "eşidilən"
-    ],
-}
-
-CURATED_STORIES: List[Dict[str, Any]] = [
-    {
-        "id": "case_01",
-        "title": "The Quiet Waiting Room",
-        "setting": "Urban clinical encounter · Anonymized composite narrative",
-        "frameworks": ["Narrative Medicine", "Self-Determination Theory", "Stigma & Help-Seeking"],
-        "quote": "I came in for persistent exhaustion and sleeplessness, yet when asked how I was coping, I said 'just busy with work' and waited for the prescription.",
-        "account": (
-            "A young adult describes entering a short medical appointment with "
-            "ongoing fatigue and sleep disruption. When a broad opening question "
-            "is asked, a brief 'just busy' response closes down further exploration "
-            "of work strain and emotional overload. Non-disclosure here functions "
-            "as a social self-protective move within time-constrained interaction."
-        ),
-        "media_cue": "Podcast Episode 02 segment (03:18) — 'Voices of Hesitation: Why young adults edit distress in brief encounters.'",
-        "research_prompt": "How do consultation pacing, perceived authority, and stigma expectations shape whether a person elaborates on distress or gives a minimal answer?",
-    },
-    {
-        "id": "case_02",
-        "title": "Labels That Travel Faster Than Care",
-        "setting": "University & family context · Azerbaijan narrative framing",
-        "frameworks": ["Stigma & Help-Seeking", "Social Cognitive Theory", "Media Framing"],
-        "quote": "In everyday conversation, seeking counseling is still whispered about as 'weakness' or 'a serious flaw,' even by people who care deeply.",
-        "account": (
-            "Students and young professionals often report tension between wanting "
-            "emotional relief and fearing how peers, family, or media stereotypes "
-            "interpret psychological help-seeking. Sensational or overly simplistic "
-            "media depictions can reinforce fear of labeling rather than modeling "
-            "constructive support."
-        ),
-        "media_cue": "Podcast Episode 01 segment (04:05) — 'Beyond the Label: Cultural scripts and stigma around mental health in Azerbaijan.'",
-        "research_prompt": "Which media frames reduce self-stigma among young adults without trivializing genuine psychological distress?",
-    },
-    {
-        "id": "case_03",
-        "title": "Finding Words Without Clinical Jargon",
-        "setting": "Peer & public storytelling · Help-seeking transition",
-        "frameworks": ["Narrative Medicine", "Social Cognitive Theory"],
-        "quote": "I didn't know how to explain what I was going through until I heard someone else describe burnout in plain, human language.",
-        "account": (
-            "Hearing relatable, non-stigmatizing accounts helps individuals name "
-            "experiences such as chronic exhaustion, social withdrawal, or "
-            "performance pressure in everyday terms, supporting earlier, more "
-            "informed conversations with trusted people or professionals."
-        ),
-        "media_cue": "Podcast Episode 03 segment (02:54) — 'Opening the Door: Plain-language storytelling and pathways to support.'",
-        "research_prompt": "How can short documentary films and podcasts pair lived stories with accurate, non-alarmist public health information?",
-    },
-]
-
-EVIDENCE_CATALOG: List[Dict[str, str]] = [
-    {
-        "claim": "Mental health stigma (public and self-stigma) is consistently associated with reduced or delayed help-seeking in empirical and review literature.",
-        "framework": "Stigma & Help-Seeking (Corrigan, 2004; Clement et al., 2015)",
-        "evidence_type": "Systematic Review & Conceptual Framework",
-        "boundary": "Association and barrier identification; context-dependent across cultures and age groups.",
-    },
-    {
-        "claim": "Narrative medicine emphasizes attention to patients' stories, silences, and social context alongside biomedical assessment.",
-        "framework": "Narrative Medicine (Charon, 2006; Kleinman, 1988)",
-        "evidence_type": "Clinical Humanities & Theoretical Framework",
-        "boundary": "Enhances interpretive understanding and communication; does not replace clinical evaluation.",
-    },
-    {
-        "claim": "Basic psychological needs (autonomy, competence, relatedness) shape motivation, engagement, and well-being across domains.",
-        "framework": "Self-Determination Theory (Deci & Ryan, 2000)",
-        "evidence_type": "Empirical Psychological Theory",
-        "boundary": "Lexicon inspection in text is descriptive only and is not a validated SDT psychometric scale.",
-    },
-    {
-        "claim": "Media framing and symbolic modeling influence public understanding and perceived self-efficacy toward health behaviors.",
-        "framework": "Framing (Entman, 1993) & Social Cognitive Theory (Bandura, 2001)",
-        "evidence_type": "Communication & Psychological Theory",
-        "boundary": "Media narratives shape perceptions and norms; audience reception varies and requires pre/post evaluation.",
-    },
-    {
-        "claim": "Text transcripts alone cannot measure acoustic silence duration, vocal prosody, gaze, or clinical diagnosis.",
-        "framework": "Methodological & Ethical Governance",
-        "evidence_type": "Research Scope Constraint",
-        "boundary": "Strict non-diagnostic boundary; independent human coding required for qualitative/thematic claims.",
-    },
-]
-
-DEFAULT_RESEARCH_CORPUS = pd.DataFrame(
-    [
-        {
-            "participant_id": "N01",
-            "theme": "Silence & Restraint",
-            "text": "I stayed quiet during the visit and held back what was bothering me because I did not want to sound weak.",
-            "phq8_binary": 1,
-            "phq8_score": 14,
-            "rater_1": "restraint",
-            "rater_2": "restraint",
-        },
-        {
-            "participant_id": "N02",
-            "theme": "Stigma & Judgment",
-            "text": "People whisper and judge when someone mentions therapy, so there is a lot of shame and secrecy around stress.",
-            "phq8_binary": 1,
-            "phq8_score": 15,
-            "rater_1": "stigma",
-            "rater_2": "stigma",
-        },
-        {
-            "participant_id": "N03",
-            "theme": "Help-Seeking & Support",
-            "text": "I talked openly with a counselor and got practical support that helped me choose healthier routines.",
-            "phq8_binary": 0,
-            "phq8_score": 4,
-            "rater_1": "help_seeking",
-            "rater_2": "help_seeking",
-        },
-        {
-            "participant_id": "N04",
-            "theme": "Silence & Restraint",
-            "text": "Mən daxilimdəki narahatlığı gizlətdim, çəkindim və sadəcə yaxşıyam deyə susdum.",
-            "phq8_binary": 1,
-            "phq8_score": 13,
-            "rater_1": "restraint",
-            "rater_2": "restraint",
-        },
-        {
-            "participant_id": "N05",
-            "theme": "Help-Seeking & Support",
-            "text": "I shared my concerns clearly, felt heard, and found useful guidance on managing pressure.",
-            "phq8_binary": 0,
-            "phq8_score": 3,
-            "rater_1": "help_seeking",
-            "rater_2": "help_seeking",
-        },
-        {
-            "participant_id": "N06",
-            "theme": "Stigma & Judgment",
-            "text": "Some media stories frame struggles around taboo or shame rather than clear, supportive information.",
-            "phq8_binary": 1,
-            "phq8_score": 12,
-            "rater_1": "stigma",
-            "rater_2": "restraint",
-        },
-        {
-            "participant_id": "N07",
-            "theme": "Help-Seeking & Support",
-            "text": "Bəlkə də əvvəl tərəddüd edirdim, amma dəstək almaq və danışmaq mənə aydınlıq gətirdi.",
-            "phq8_binary": 0,
-            "phq8_score": 5,
-            "rater_1": "help_seeking",
-            "rater_2": "help_seeking",
-        },
-        {
-            "participant_id": "N08",
-            "theme": "Silence & Restraint",
-            "text": "I felt pressure and uncertain about whether anyone would listen, so I kept my worries to myself.",
-            "phq8_binary": 1,
-            "phq8_score": 16,
-            "rater_1": "restraint",
-            "rater_2": "restraint",
-        },
-    ]
-)
-
-# =====================================================================
-# 3. DATA INGESTION, CLEANING & VALIDATION UTILITIES
-# =====================================================================
-
-def clean_text(value: Any) -> str:
-    """Normalize whitespace and safely convert scalar/missing values to str."""
-    if value is None:
-        return ""
-    try:
-        if pd.isna(value):
-            return ""
-    except (TypeError, ValueError):
-        pass
-    return re.sub(r"\s+", " ", str(value)).strip()
-
-
-def normalize_col_name(col: Any) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", str(col).strip().lower()).strip("_")
-
-
-def find_matching_column(columns: Any, candidates: List[str]) -> Optional[str]:
-    col_map = {normalize_col_name(c): c for c in columns}
-    for cand in candidates:
-        key = normalize_col_name(cand)
-        if key in col_map:
-            return col_map[key]
-    return None
-
-
-def read_csv_safely(raw_bytes: bytes, filename: str = "dataset.csv") -> pd.DataFrame:
-    errors: List[str] = []
-    for enc in ("utf-8", "utf-8-sig", "latin-1"):
-        try:
-            return pd.read_csv(io.BytesIO(raw_bytes), encoding=enc)
-        except Exception as exc:
-            errors.append(f"{enc}: {exc}")
-    raise ValueError(f"Unable to parse CSV '{filename}'. Details: {' | '.join(errors[-2:])}")
-
-
-def normalize_uploaded_csv(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalize flexible CSV column names into a transparent research schema."""
-    text_col = find_matching_column(
-        df.columns,
-        ["text", "transcript", "utterance", "narrative", "speech", "statement", "response"],
-    )
-    if text_col is None:
-        raise ValueError(
-            "No text/narrative column found. Include a column named "
-            "'text', 'transcript', 'narrative', or 'utterance'."
-        )
-
-    id_col = find_matching_column(
-        df.columns,
-        ["participant_id", "doc_id", "id", "subject_id", "participant", "case_id"],
-    )
-    theme_col = find_matching_column(
-        df.columns,
-        ["theme", "category", "topic", "domain", "frame"],
-    )
-    bin_col = find_matching_column(
-        df.columns,
-        ["phq8_binary", "phq_8_binary", "distress_flag", "binary_label", "label"],
-    )
-    score_col = find_matching_column(
-        df.columns,
-        ["phq8_score", "phq_8_score", "phq8", "score", "scale_score"],
-    )
-    r1_col = find_matching_column(
-        df.columns,
-        ["rater_1", "coder_1", "annotator_1", "code_a"],
-    )
-    r2_col = find_matching_column(
-        df.columns,
-        ["rater_2", "coder_2", "annotator_2", "code_b"],
-    )
-
-    out = pd.DataFrame(index=df.index)
-    if id_col is not None:
-        raw_ids = df[id_col].map(clean_text)
-        out["participant_id"] = [v if v else f"item_{i+1:03d}" for i, v in enumerate(raw_ids)]
-    else:
-        out["participant_id"] = [f"item_{i+1:03d}" for i in range(len(df))]
-
-    if theme_col is not None:
-        raw_themes = df[theme_col].map(clean_text)
-        out["theme"] = [v if v else "Unspecified Theme" for v in raw_themes]
-    else:
-        out["theme"] = "Unspecified Theme"
-
-    out["text"] = df[text_col].map(clean_text)
-    out["phq8_binary"] = pd.to_numeric(df[bin_col], errors="coerce") if bin_col is not None else np.nan
-    out["phq8_score"] = pd.to_numeric(df[score_col], errors="coerce") if score_col is not None else np.nan
-    out["rater_1"] = df[r1_col].map(clean_text) if r1_col is not None else ""
-    out["rater_2"] = df[r2_col].map(clean_text) if r2_col is not None else ""
-
-    return out.reset_index(drop=True)
-
-
-def parse_transcript_csv_bytes(raw_bytes: bytes, filename: str) -> Optional[Dict[str, Any]]:
-    """Parse transcript CSVs (including DAIC-style speaker/value rows) safely."""
-    sub = read_csv_safely(raw_bytes, filename)
-    text_col = find_matching_column(sub.columns, ["value", "text", "utterance", "transcript", "narrative"])
-    if text_col is None:
-        return None
-
-    speaker_col = find_matching_column(sub.columns, ["speaker", "role", "speaker_id"])
-    if speaker_col is not None:
-        speakers = sub[speaker_col].map(clean_text).str.lower()
-        mask = speakers.str.contains(r"participant|patient|subject", regex=True, na=False)
-        rows = sub.loc[mask, text_col] if mask.any() else sub[text_col]
-    else:
-        rows = sub[text_col]
-
-    joined = " ".join(cleaned for item in rows if (cleaned := clean_text(item)))
-    if not joined:
-        return None
-
-    pid_match = re.search(r"(\d+)", filename)
-    pid = pid_match.group(1) if pid_match else filename
-    return {
-        "participant_id": str(pid),
-        "theme": "Transcript Archive",
-        "text": joined,
-        "phq8_binary": np.nan,
-        "phq8_score": np.nan,
-        "rater_1": "",
-        "rater_2": "",
-    }
-
-
-def parse_zip_archive(raw_bytes: bytes) -> Tuple[pd.DataFrame, int]:
-    """Extract CSV transcripts and optional PHQ-8 metadata from a ZIP archive."""
-    transcripts: List[Dict[str, Any]] = []
-    skipped_files = 0
-    meta_frames: List[pd.DataFrame] = []
-
-    try:
-        zf = zipfile.ZipFile(io.BytesIO(raw_bytes))
-    except zipfile.BadZipFile as exc:
-        raise ValueError("Uploaded ZIP file is corrupted or invalid.") from exc
-
-    with zf:
-        for member in zf.namelist():
-            if member.endswith("/") or "__MACOSX" in member:
-                continue
-            base = member.rsplit("/", 1)[-1]
-            if not base.lower().endswith(".csv"):
-                continue
-            content = zf.read(member)
-            if "transcript" in base.lower():
-                parsed = parse_transcript_csv_bytes(content, base)
-                if parsed is not None:
-                    transcripts.append(parsed)
-                else:
-                    skipped_files += 1
-            else:
-                try:
-                    meta_frames.append(read_csv_safely(content, base))
-                except Exception:
-                    skipped_files += 1
-
-    if not transcripts:
-        raise ValueError("No valid transcript CSV files were found inside the ZIP archive.")
-
-    df = pd.DataFrame(transcripts)
-
-    for mdf in meta_frames:
-        id_col = find_matching_column(mdf.columns, ["participant_id", "participant", "subject_id", "id"])
-        bin_col = find_matching_column(mdf.columns, ["phq8_binary", "phq_8_binary", "phq8binary"])
-        if id_col is not None and bin_col is not None:
-            meta = pd.DataFrame()
-            raw_ids = mdf[id_col].map(clean_text)
-            extracted = raw_ids.str.extract(r"(\d+)", expand=False)
-            meta["participant_id"] = extracted.where(extracted.notna(), raw_ids)
-            meta["phq8_binary_meta"] = pd.to_numeric(mdf[bin_col], errors="coerce")
-            score_col = find_matching_column(mdf.columns, ["phq8_score", "phq_8_score", "phq8"])
-            if score_col is not None:
-                meta["phq8_score_meta"] = pd.to_numeric(mdf[score_col], errors="coerce")
-            else:
-                meta["phq8_score_meta"] = np.nan
-            meta = meta.drop_duplicates(subset=["participant_id"], keep="first")
-            df = df.merge(meta, on="participant_id", how="left")
-            df["phq8_binary"] = df["phq8_binary_meta"].combine_first(df["phq8_binary"])
-            df["phq8_score"] = df["phq8_score_meta"].combine_first(df["phq8_score"])
-            df = df.drop(columns=["phq8_binary_meta", "phq8_score_meta"], errors="ignore")
-            break
-
-    return df, skipped_files
-
-
-def aggregate_by_participant(df: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate multiple rows per participant without fabricating missing values."""
-    rows: List[Dict[str, Any]] = []
-    for pid, grp in df.groupby("participant_id", dropna=False, sort=False):
-        texts = [clean_text(x) for x in grp["text"]]
-        joined_text = " ".join(t for t in texts if t)
-
-        themes = [clean_text(x) for x in grp["theme"] if clean_text(x) and clean_text(x) != "Unspecified Theme"]
-        theme_val = themes[0] if len(themes) == 1 else ("Multiple / Mixed" if len(themes) > 1 else "Unspecified Theme")
-
-        bins = pd.to_numeric(grp["phq8_binary"], errors="coerce").dropna().unique()
-        bin_val = float(bins[0]) if len(bins) == 1 else np.nan
-
-        scores = pd.to_numeric(grp["phq8_score"], errors="coerce").dropna().unique()
-        score_val = float(scores[0]) if len(scores) == 1 else np.nan
-
-        r1_vals = [clean_text(x) for x in grp["rater_1"] if clean_text(x)]
-        r2_vals = [clean_text(x) for x in grp["rater_2"] if clean_text(x)]
-
-        rows.append(
-            {
-                "participant_id": str(pid),
-                "theme": theme_val,
-                "text": joined_text,
-                "phq8_binary": bin_val,
-                "phq8_score": score_val,
-                "rater_1": r1_vals[0] if len(r1_vals) == 1 else "",
-                "rater_2": r2_vals[0] if len(r2_vals) == 1 else "",
-            }
-        )
-
-    out = pd.DataFrame(rows)
-    out["token_count"] = out["text"].map(lambda t: len(re.findall(r"\b[\w'-]+\b", t)))
-    out["sentence_count"] = out["text"].map(
-        lambda t: max(1, len([s for s in re.split(r"[.!?]+", t) if s.strip()])) if t.strip() else 0
-    )
-    out["avg_sentence_length"] = np.where(
-        out["sentence_count"] > 0,
-        out["token_count"] / out["sentence_count"],
-        0.0,
-    )
-    return out
-
-
-# =====================================================================
-# 4. TRANSPARENT LINGUISTIC & PSYCHOLOGICAL-DISCOURSE METRICS
-# =====================================================================
-
-def compute_lexical_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Compute transparent, non-diagnostic lexical category proportions
-    (matches per 100 tokens) for each record.
-    """
-    enriched = df.copy()
-    cat_cols: List[str] = []
-
-    for cat_name, keywords in LEXICON_CATEGORIES.items():
-        kw_set = {k.lower() for k in keywords}
-        col_rate = f"{cat_name}_per100"
-        col_raw = f"{cat_name}_hits"
-        cat_cols.append(col_rate)
-
-        raw_hits: List[int] = []
-        rates_per_100: List[float] = []
-
-        for txt in enriched["text"].astype(str):
-            tokens = [tok.lower() for tok in re.findall(r"\b[\w'-]+\b", txt)]
-            n_tok = len(tokens)
-            hits = sum(1 for tok in tokens if tok in kw_set)
-            raw_hits.append(hits)
-            rates_per_100.append(round((hits / n_tok) * 100.0, 2) if n_tok > 0 else 0.0)
-
-        enriched[col_raw] = raw_hits
-        enriched[col_rate] = rates_per_100
-
-    enriched.attrs["rate_columns"] = cat_cols
-    return enriched
-
-
-def compute_cohens_kappa(r1: pd.Series, r2: pd.Series) -> Dict[str, Any]:
-    """
-    Compute real Cohen's kappa ONLY when two non-empty rater columns exist.
-    Never fabricates or hardcodes an agreement score.
-    """
-    pair = pd.DataFrame({"r1": r1.map(clean_text), "r2": r2.map(clean_text)})
-    pair = pair[(pair["r1"] != "") & (pair["r2"] != "")]
-    n = len(pair)
-    if n < 2:
-        return {
-            "available": False,
-            "n_paired": n,
-            "kappa": None,
-            "observed_agreement": None,
-            "note": "At least 2 paired human annotations (rater_1 and rater_2) are required to compute Cohen's kappa.",
-        }
-
-    categories = sorted(set(pair["r1"]).union(set(pair["r2"])))
-    if len(categories) < 2:
-        po = float((pair["r1"] == pair["r2"]).mean())
-        return {
-            "available": True,
-            "n_paired": n,
-            "kappa": None,
-            "observed_agreement": round(po, 4),
-            "note": "Only one unique label appears across both raters; chance agreement prevents standard kappa division.",
-        }
-
-    po = float((pair["r1"] == pair["r2"]).mean())
-    pe = 0.0
-    for c in categories:
-        p1 = float((pair["r1"] == c).mean())
-        p2 = float((pair["r2"] == c).mean())
-        pe += p1 * p2
-
-    denom = 1.0 - pe
-    kappa = float((po - pe) / denom) if abs(denom) > 1e-12 else None
-
-    return {
-        "available": True,
-        "n_paired": n,
-        "kappa": round(kappa, 4) if kappa is not None else None,
-        "observed_agreement": round(po, 4),
-        "expected_agreement": round(pe, 4),
-        "note": "Computed directly from supplied rater_1 and rater_2 columns.",
-    }
-
-
-def compute_exploratory_associations(df: pd.DataFrame) -> Dict[str, Any]:
-    """Compute genuine non-parametric/parametric statistics only when data supports them."""
-    out: Dict[str, Any] = {}
-
-    score_sub = df[["token_count", "phq8_score"]].dropna()
-    if len(score_sub) >= 3 and score_sub["token_count"].nunique() > 1 and score_sub["phq8_score"].nunique() > 1:
-        if HAS_SCIPY and scipy_stats is not None:
-            rho, pval = scipy_stats.spearmanr(score_sub["token_count"], score_sub["phq8_score"])
-            out["spearman"] = {
-                "n": len(score_sub),
-                "rho": round(float(rho), 4),
-                "p_value": round(float(pval), 4),
-            }
-        else:
-            rho = float(score_sub["token_count"].corr(score_sub["phq8_score"], method="spearman"))
-            out["spearman"] = {
-                "n": len(score_sub),
-                "rho": round(rho, 4),
-                "p_value": None,
-            }
-    else:
-        out["spearman"] = None
-
-    bin_sub = df[df["phq8_binary"].isin([0, 1])].copy()
-    g0 = bin_sub.loc[bin_sub["phq8_binary"] == 0, "token_count"]
-    g1 = bin_sub.loc[bin_sub["phq8_binary"] == 1, "token_count"]
-    if len(g0) >= 2 and len(g1) >= 2 and HAS_SCIPY and scipy_stats is not None:
-        u_stat, u_pval = scipy_stats.mannwhitneyu(g0, g1, alternative="two-sided")
-        out["mann_whitney_tokens"] = {
-            "n_0": len(g0),
-            "n_1": len(g1),
-            "u_stat": round(float(u_stat), 2),
-            "p_value": round(float(u_pval), 4),
-        }
-    else:
-        out["mann_whitney_tokens"] = None
-
-    return out
-
-
-# =====================================================================
-# 5. OPTIONAL SECONDARY BASELINE NLP EVALUATION (EXPLORATORY ONLY)
-# =====================================================================
-
-def run_exploratory_tfidf_cv(df: pd.DataFrame) -> Dict[str, Any]:
-    """
-    Secondary exploratory TF-IDF + LogisticRegression out-of-fold evaluation
-    when two binary classes (0/1) each have >= 2 records.
-    """
-    if not HAS_SKLEARN:
-        raise RuntimeError("scikit-learn is not installed in the current environment.")
-
-    sub = df[df["phq8_binary"].isin([0, 1]) & df["text"].str.len().gt(0)].copy()
-    X = sub["text"].astype(str).to_numpy()
-    y = sub["phq8_binary"].astype(int).to_numpy()
-
-    counts = pd.Series(y).value_counts()
-    if len(counts) != 2 or int(counts.min()) < 2:
-        raise ValueError(
-            "Exploratory cross-validation requires both binary classes (0 and 1) "
-            "with at least 2 records per class."
-        )
-
-    n_splits = min(5, int(counts.min()))
-    cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
-
-    vec_word = TfidfVectorizer(
-        analyzer="word",
-        ngram_range=(1, 2),
-        min_df=1,
-        max_features=8000,
-        sublinear_tf=True,
-        strip_accents="unicode",
-    )
-    vec_char = TfidfVectorizer(
-        analyzer="char",
-        ngram_range=(3, 5),
-        min_df=1,
-        max_features=8000,
-        sublinear_tf=True,
-    )
-    pipe = Pipeline(
-        [
-            ("feats", FeatureUnion([("word", vec_word), ("char", vec_char)])),
-            ("clf", LogisticRegression(max_iter=1500, class_weight="balanced", solver="liblinear", random_state=42)),
-        ]
-    )
-
-    probs = cross_val_predict(pipe, X, y, cv=cv, method="predict_proba")[:, 1]
-    preds = (probs >= 0.5).astype(int)
-
-    dummy = DummyClassifier(strategy="prior")
-    dummy_preds = cross_val_predict(dummy, X.reshape(-1, 1), y, cv=cv, method="predict")
-
-    roc_val = float(roc_auc_score(y, probs)) if len(np.unique(y)) == 2 else float("nan")
-    pr_val = float(average_precision_score(y, probs))
-
-    return {
-        "n_records": int(len(y)),
-        "folds": int(n_splits),
-        "accuracy": float(accuracy_score(y, preds)),
-        "balanced_accuracy": float(balanced_accuracy_score(y, preds)),
-        "macro_f1": float(f1_score(y, preds, average="macro", zero_division=0)),
-        "roc_auc": roc_val,
-        "pr_auc": pr_val,
-        "brier_score": float(brier_score_loss(y, probs)),
-        "baseline_accuracy": float(accuracy_score(y, dummy_preds)),
-        "baseline_macro_f1": float(f1_score(y, dummy_preds, average="macro", zero_division=0)),
-        "confusion_matrix": confusion_matrix(y, preds, labels=[0, 1]),
-        "predictions": pd.DataFrame(
-            {
-                "participant_id": sub["participant_id"].values,
-                "actual_label": y,
-                "predicted_probability": np.round(probs, 4),
-                "predicted_label": preds,
-            }
-        ),
-    }
-
-
-# =====================================================================
-# 6. SIDEBAR NAVIGATION (8 SECTIONS)
-# =====================================================================
-
-st.sidebar.markdown('<div class="kicker">THE NEUROMETRIC GAZE</div>', unsafe_allow_html=True)
-st.sidebar.markdown("### Beyond the Unheard")
-st.sidebar.caption("Narrative Medicine · Psychological Discourse · Media Intervention")
-
-page = st.sidebar.radio(
-    "Section",
-    [
-        "01 · Home",
-        "02 · The Problem",
-        "03 · Human Stories",
-        "04 · Research Lab",
-        "05 · Evidence Library",
-        "06 · The Intervention",
-        "07 · Impact",
-        "08 · About & Ethics",
-    ],
-)
-
-st.sidebar.markdown("---")
-st.sidebar.caption(
-    "Research & media prototype aligned with Harvard MS-MMH themes "
-    "(storytelling, social medicine, health communication, and public impact)."
-)
-
-# =====================================================================
-# 7. SECTION 01 — HOME
-# =====================================================================
-
-if page == "01 · Home":
-    st.markdown('<div class="kicker">STORIES · EVIDENCE · UNDERSTANDING · ACTION</div>', unsafe_allow_html=True)
-    st.title("Beyond the Unheard")
-    st.markdown(
-        "### Understanding mental health narratives, stigma, and help-seeking "
-        "through grounded research and human-centered media"
-    )
-    st.markdown(
-        "Mental health is shaped not only by clinical symptoms, but also by cultural "
-        "scripts, fear of judgment, unspoken silences, and how public media frames "
-        "psychological distress. This platform integrates **human stories**, "
-        "**transparent research analysis**, and **media intervention** with an "
-        "emphasis on young adults in Azerbaijan."
-    )
-
-    st.info(
-        "**Research Question:** How do media narratives shape young adults' "
-        "understanding of mental health stigma and help-seeking in Azerbaijan?"
-    )
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown(
-            """
-            <div class="scholar-card">
-                <div class="kicker">PILLAR 01 · HUMAN STORIES</div>
-                <h4>Lived Experiences & Silence</h4>
-                <p>Anonymized narratives examining restraint, stigma, and how people find words to describe distress and seek care.</p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with c2:
-        st.markdown(
-            """
-            <div class="teal-card">
-                <div class="kicker">PILLAR 02 · RESEARCH & EVIDENCE</div>
-                <h4>Theory-Grounded Inquiry</h4>
-                <p>Connects Narrative Medicine, Self-Determination Theory, Stigma frameworks, and transparent text metrics without fabricated scores.</p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with c3:
-        st.markdown(
-            """
-            <div class="scholar-card">
-                <div class="kicker">PILLAR 03 · MEDIA INTERVENTION</div>
-                <h4>Documentary, Podcast & Action</h4>
-                <p>Translates findings into a short documentary, a 3-episode podcast series, awareness assets, and pre/post audience evaluation.</p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    st.markdown("### Project Architecture & 10-Week Execution Roadmap")
-    roadmap_df = pd.DataFrame(
-        [
-            {"Weeks": "Week 1–2", "Phase": "Research Question & Literature", "Deliverable": "Refined Azerbaijan mental health narrative & stigma scope; literature synthesis"},
-            {"Weeks": "Week 3–4", "Phase": "Ethics, Sampling & Corpus", "Deliverable": "Consent/anonymization protocol; media/interview/survey dataset & coding rubric"},
-            {"Weeks": "Week 5–6", "Phase": "Analysis & Narrative Arc", "Deliverable": "Thematic findings, transparent text metrics, and documentary/podcast structure"},
-            {"Weeks": "Week 7–8", "Phase": "Media & Platform Production", "Deliverable": "Interactive platform, 5–8 min documentary cut, 3-part podcast & campaign assets"},
-            {"Weeks": "Week 9–10", "Phase": "Pilot Impact & Portfolio", "Deliverable": "Pre/post audience test, limitations audit, and Harvard MS-MMH portfolio package"},
-        ]
-    )
-    st.dataframe(roadmap_df, use_container_width=True, hide_index=True)
-
-# =====================================================================
-# 8. SECTION 02 — THE PROBLEM
-# =====================================================================
-
-elif page == "02 · The Problem":
-    st.markdown('<div class="kicker">SOCIAL MEDICINE & COMMUNICATION BARRIERS</div>', unsafe_allow_html=True)
-    st.header("The Problem: Silence, Stigma, and Narrative Gaps")
-    st.markdown(
-        "In many social contexts, discussions of psychological distress remain "
-        "constrained by stigma, fear of social judgment, and narrow media tropes. "
-        "When public discourse treats emotional strain as a taboo or relies on "
-        "sensationalism, young adults may delay asking for help or minimize "
-        "symptoms in everyday and clinical conversations."
-    )
-
-    col_l, col_r = st.columns(2)
-    with col_l:
-        st.markdown(
-            """
-            <div class="scholar-card">
-                <div class="amber-badge">Stigma & Social Risk</div>
-                <h4>Why People Stay Quiet</h4>
-                <p>Fear of being judged, misunderstood by family or peers, or labeled 'weak' can lead individuals to conceal distress and appear 'fine' on the surface.</p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with col_r:
-        st.markdown(
-            """
-            <div class="teal-card">
-                <div class="badge">Media & Public Framing</div>
-                <h4>How Narratives Shape Norms</h4>
-                <p>Media coverage and social norms influence whether mental health is approached with empathy and practical support pathways or stigma and avoidance.</p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    st.markdown("### Scope Boundaries")
-    st.warning(
-        "This platform studies narratives, stigma framing, and public health "
-        "communication. It does not diagnose conditions, infer private mental "
-        "states from text alone, or replace licensed clinical care."
-    )
-
-# =====================================================================
-# 9. SECTION 03 — HUMAN STORIES
-# =====================================================================
-
-elif page == "03 · Human Stories":
-    st.markdown('<div class="kicker">INTERACTIVE STORYTELLING</div>', unsafe_allow_html=True)
-    st.header("Human Stories: Voices and Silences")
-    st.markdown(
-        "Explore anonymized composite narratives illustrating how restraint, "
-        "social stigma, and supportive communication appear in lived accounts."
-    )
-
-    titles = [item["title"] for item in CURATED_STORIES]
-    chosen = st.selectbox("Select a narrative study", titles)
-    selected_story = next(item for item in CURATED_STORIES if item["title"] == chosen)
-
-    badges_html = "".join(
-        f'<span class="badge">{fw}</span>' for fw in selected_story["frameworks"]
-    )
+def inject_css() -> None:
     st.markdown(
         f"""
-        <div class="scholar-card">
-            <div class="kicker">{selected_story["setting"]}</div>
-            <h3>{selected_story["title"]}</h3>
-            <div>{badges_html}</div>
-            <div class="pull-quote">“{selected_story["quote"]}”</div>
-            <p>{selected_story["account"]}</p>
-            <p><strong>Media Cue:</strong> {selected_story["media_cue"]}</p>
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Playfair+Display:ital,wght@0,400;0,700;1,400&display=swap');
+
+        html, body, [class*="css"], .stApp {{
+            font-family: 'Inter', sans-serif;
+            color: {BRAND['navy']};
+            background-color: {BRAND['ivory']};
+        }}
+        .block-container {{
+            padding-top: 2.5rem;
+            padding-bottom: 3rem;
+            max-width: 1200px;
+        }}
+        h1, h2, h3, h4 {{
+            font-family: 'Playfair Display', serif;
+            letter-spacing: -0.015em;
+            color: {BRAND['navy']};
+        }}
+        h1 {{ font-size: 2.7rem; line-height: 1.15; }}
+        h2 {{ font-size: 1.9rem; line-height: 1.25; }}
+        h3 {{ font-size: 1.3rem; }}
+
+        section[data-testid="stSidebar"] {{
+            background-color: {BRAND['navy']} !important;
+            border-right: 1px solid rgba(214,165,108,0.2);
+        }}
+        section[data-testid="stSidebar"] * {{ color: {BRAND['ivory']} !important; }}
+        section[data-testid="stSidebar"] hr {{ border-color: rgba(214,165,108,0.25); }}
+
+        .hero {{
+            text-align: center;
+            padding: 3rem 1rem 2rem 1rem;
+            border-bottom: 1px solid {BRAND['muted']};
+            margin-bottom: 2rem;
+        }}
+        .hero-kicker {{
+            color: {BRAND['teal']};
+            letter-spacing: 0.3em;
+            font-size: 0.72rem;
+            font-weight: 500;
+        }}
+        .hero-title {{
+            font-family: 'Playfair Display', serif;
+            font-size: 3.6rem;
+            line-height: 1.05;
+            margin: 1rem 0;
+        }}
+        .hero-sub {{
+            font-size: 1.1rem;
+            color: {BRAND['teal']};
+            max-width: 680px;
+            margin: 0 auto;
+            line-height: 1.6;
+        }}
+        .hero-tags {{
+            margin-top: 1.8rem;
+            color: {BRAND['amber']};
+            font-weight: 600;
+            letter-spacing: 0.15em;
+            font-size: 0.78rem;
+        }}
+
+        .synth-banner {{
+            background: {BRAND['amber']};
+            color: white;
+            padding: 0.7rem 1.2rem;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            margin: 1rem 0;
+            letter-spacing: 0.02em;
+        }}
+        .info-box {{
+            background: {BRAND['muted']};
+            border-left: 4px solid {BRAND['amber']};
+            padding: 1.1rem 1.4rem;
+            border-radius: 8px;
+            margin: 1.2rem 0;
+            font-size: 0.92rem;
+            line-height: 1.6;
+        }}
+        .danger-box {{
+            background: #F8E5E3;
+            border-left: 4px solid {BRAND['danger']};
+            padding: 1.1rem 1.4rem;
+            border-radius: 8px;
+            margin: 1.2rem 0;
+            font-size: 0.92rem;
+            line-height: 1.6;
+        }}
+        .success-box {{
+            background: #E6F0EE;
+            border-left: 4px solid {BRAND['teal']};
+            padding: 1.1rem 1.4rem;
+            border-radius: 8px;
+            margin: 1.2rem 0;
+            font-size: 0.92rem;
+            line-height: 1.6;
+        }}
+
+        .pillar {{
+            background: #FFFFFF;
+            border-radius: 12px;
+            padding: 1.7rem 1.5rem;
+            border: 1px solid {BRAND['muted']};
+            height: 100%;
+            transition: 0.25s;
+        }}
+        .pillar:hover {{
+            border-color: {BRAND['teal']};
+            box-shadow: 0 8px 28px rgba(20,36,58,0.08);
+        }}
+        .pillar .num {{
+            font-family: 'Playfair Display', serif;
+            color: {BRAND['amber']};
+            font-weight: 700;
+            font-size: 0.95rem;
+        }}
+        .pillar h3 {{ margin: 0.5rem 0 0.7rem 0; font-size: 1.25rem; }}
+        .pillar p {{ color: #4a4a4a; line-height: 1.6; font-size: 0.93rem; }}
+
+        .stat-card {{
+            background: #FFFFFF;
+            border-radius: 10px;
+            padding: 1.3rem 1.4rem;
+            border: 1px solid {BRAND['muted']};
+            margin-bottom: 0.9rem;
+        }}
+        .stat-card .label {{
+            color: {BRAND['teal']};
+            font-size: 0.74rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            font-weight: 600;
+        }}
+        .stat-card .value {{
+            font-family: 'Playfair Display', serif;
+            font-size: 2rem;
+            margin: 0.3rem 0;
+        }}
+        .stat-card .note {{
+            color: #777;
+            font-size: 0.82rem;
+            line-height: 1.5;
+        }}
+
+        .codebook-row {{
+            background: #FFFFFF;
+            border-radius: 8px;
+            padding: 0.9rem 1.2rem;
+            margin-bottom: 0.6rem;
+            border-left: 3px solid {BRAND['teal']};
+        }}
+        .codebook-row .code {{
+            font-family: 'Inter', monospace;
+            color: {BRAND['amber']};
+            font-weight: 700;
+            font-size: 0.8rem;
+        }}
+        .codebook-row .name {{
+            font-weight: 600;
+            margin: 0.2rem 0;
+        }}
+        .codebook-row .desc {{
+            font-size: 0.86rem;
+            color: #555;
+            line-height: 1.5;
+        }}
+
+        .ref-card {{
+            background: #FFFFFF;
+            border-radius: 10px;
+            padding: 1.2rem 1.4rem;
+            margin-bottom: 0.9rem;
+            border: 1px solid {BRAND['muted']};
+        }}
+        .ref-card .num {{
+            display: inline-block;
+            background: {BRAND['navy']};
+            color: white;
+            width: 28px; height: 28px;
+            border-radius: 50%;
+            text-align: center;
+            line-height: 28px;
+            font-weight: 600;
+            font-size: 0.8rem;
+            margin-right: 0.7rem;
+        }}
+        .ref-card .title {{ font-weight: 600; font-size: 0.98rem; }}
+        .ref-card .authors {{ color: #555; font-size: 0.86rem; margin-top: 0.35rem; }}
+        .ref-card .meta {{ color: {BRAND['teal']}; font-size: 0.8rem; margin-top: 0.5rem; }}
+        .ref-card .role {{
+            display: inline-block;
+            background: {BRAND['muted']};
+            color: {BRAND['teal']};
+            padding: 2px 10px;
+            border-radius: 10px;
+            font-size: 0.72rem;
+            margin-top: 0.6rem;
+            font-weight: 600;
+        }}
+
+        .pull-quote {{
+            font-family: 'Playfair Display', serif;
+            font-size: 1.45rem;
+            line-height: 1.5;
+            color: {BRAND['teal']};
+            border-left: 3px solid {BRAND['amber']};
+            padding-left: 1.6rem;
+            margin: 2rem 0;
+            font-style: italic;
+        }}
+
+        .badge {{
+            display: inline-block;
+            padding: 3px 11px;
+            border-radius: 12px;
+            font-size: 0.72rem;
+            font-weight: 600;
+        }}
+        .badge-high {{ background: {BRAND['teal']}; color: white; }}
+        .badge-med  {{ background: {BRAND['amber']}; color: white; }}
+        .badge-low  {{ background: {BRAND['danger']}; color: white; }}
+
+        .stButton > button {{
+            background-color: {BRAND['navy']};
+            color: {BRAND['ivory']};
+            border: none;
+            border-radius: 8px;
+            padding: 0.5rem 1.3rem;
+            font-weight: 500;
+        }}
+        .stButton > button:hover {{ background-color: {BRAND['teal']}; color: white; }}
+
+        .stTabs [data-baseweb="tab"] {{
+            color: {BRAND['teal']};
+            padding: 0.55rem 1.1rem;
+        }}
+        .stTabs [aria-selected="true"] {{
+            background-color: #FFFFFF;
+            color: {BRAND['navy']};
+            border-bottom: 2px solid {BRAND['amber']};
+        }}
+
+        hr {{ border-color: {BRAND['muted']}; }}
+        #MainMenu, footer, header {{ visibility: hidden; }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+inject_css()
+
+
+# =============================================================================
+# 3. STATISTICAL FUNCTIONS (real implementations, not placeholders)
+# =============================================================================
+
+def cronbach_alpha(items: pd.DataFrame) -> float | None:
+    """Cronbach's alpha for internal consistency.
+
+    Parameters
+    ----------
+    items : pd.DataFrame
+        Rows = participants, columns = items (numeric, same scale direction).
+
+    Returns
+    -------
+    float or None
+        Alpha value; None if undefined (fewer than 2 items, zero total variance).
+    """
+    df = items.dropna()
+    k = df.shape[1]
+    if k < 2 or len(df) < 2:
+        return None
+    item_variances = df.var(axis=0, ddof=1)
+    total_variance = df.sum(axis=1).var(ddof=1)
+    if total_variance <= 0:
+        return None
+    return float((k / (k - 1)) * (1 - item_variances.sum() / total_variance))
+
+
+def mcdonald_omega_approx(items: pd.DataFrame) -> float | None:
+    """Approximate McDonald's omega for a single-factor model via PCA.
+
+    This is a *demonstration approximation*. For publication, use a proper
+    CFA-based estimator (e.g., `semopy`, `lavaan`) with a theoretically
+    justified factor structure.
+    """
+    df = items.dropna()
+    if df.shape[1] < 3 or len(df) < 5:
+        return None
+    corr = df.corr().values
+    eigvals, eigvecs = np.linalg.eigh(corr)
+    idx = np.argsort(eigvals)[::-1]
+    eigvals = eigvals[idx]
+    eigvecs = eigvecs[:, idx]
+    loadings = eigvecs[:, 0] * np.sqrt(max(eigvals[0], 0))
+    sum_l = loadings.sum()
+    sum_u = (1 - loadings**2).sum()
+    denom = sum_l**2 + sum_u
+    if denom <= 0:
+        return None
+    return float((sum_l**2) / denom)
+
+
+def cohens_d(group_a: Sequence[float], group_b: Sequence[float]) -> float | None:
+    """Cohen's d for independent groups (pooled SD)."""
+    a = np.asarray([x for x in group_a if not pd.isna(x)], dtype=float)
+    b = np.asarray([x for x in group_b if not pd.isna(x)], dtype=float)
+    if len(a) < 2 or len(b) < 2:
+        return None
+    n1, n2 = len(a), len(b)
+    s1, s2 = a.var(ddof=1), b.var(ddof=1)
+    pooled = math.sqrt(((n1 - 1) * s1 + (n2 - 1) * s2) / (n1 + n2 - 2))
+    if pooled == 0:
+        return None
+    return float((a.mean() - b.mean()) / pooled)
+
+
+def paired_cohens_d(before: Sequence[float], after: Sequence[float]) -> float | None:
+    """Cohen's d for paired samples (d_z)."""
+    a = np.asarray(before, dtype=float)
+    b = np.asarray(after, dtype=float)
+    mask = ~(np.isnan(a) | np.isnan(b))
+    a, b = a[mask], b[mask]
+    if len(a) < 2:
+        return None
+    diff = b - a
+    sd = diff.std(ddof=1)
+    if sd == 0:
+        return None
+    return float(diff.mean() / sd)
+
+
+def krippendorff_alpha_nominal(data: np.ndarray) -> float | None:
+    """Krippendorff's alpha for nominal data (units x coders, NaN = missing)."""
+    data = np.asarray(data, dtype=float)
+    values = sorted({v for row in data for v in row if not np.isnan(v)})
+    if len(values) < 2:
+        return 1.0
+    idx = {v: i for i, v in enumerate(values)}
+    V = len(values)
+    coincidence = np.zeros((V, V))
+    for row in data:
+        codings = [v for v in row if not np.isnan(v)]
+        m = len(codings)
+        if m < 2:
+            continue
+        for i, v1 in enumerate(codings):
+            for j, v2 in enumerate(codings):
+                if i != j:
+                    coincidence[idx[v1], idx[v2]] += 1 / (m - 1)
+    n_c = coincidence.sum(axis=1)
+    n_total = n_c.sum()
+    if n_total <= 1:
+        return None
+    observed = (coincidence.sum() - np.trace(coincidence)) / n_total
+    expected = 0.0
+    for c in range(V):
+        for k in range(V):
+            if c != k:
+                expected += n_c[c] * n_c[k]
+    expected = expected / (n_total * (n_total - 1))
+    if expected == 0:
+        return 1.0
+    return float(1 - observed / expected)
+
+
+def sample_size_two_arm(d: float, alpha: float = 0.05, power: float = 0.80) -> int:
+    """Per-arm sample size for two-sample t-test (Cohen's approximation)."""
+    z_a = stats.norm.ppf(1 - alpha / 2)
+    z_b = stats.norm.ppf(power)
+    return int(math.ceil(((z_a + z_b) ** 2) * 2 / (d**2)))
+
+
+def power_curve(d: float, ns: Iterable[int], alpha: float = 0.05) -> pd.DataFrame:
+    """Power as a function of per-arm n for a two-sample t-test."""
+    rows = []
+    z_a = stats.norm.ppf(1 - alpha / 2)
+    for n in ns:
+        ncp = d * math.sqrt(n / 2)
+        power = 1 - stats.norm.cdf(z_a - ncp) + stats.norm.cdf(-z_a - ncp)
+        rows.append({"n_per_arm": n, "power": power})
+    return pd.DataFrame(rows)
+
+
+def interpret_d(d: float | None) -> str:
+    if d is None:
+        return "—"
+    a = abs(d)
+    if a < 0.2:
+        return "trivial"
+    if a < 0.5:
+        return "small"
+    if a < 0.8:
+        return "medium"
+    return "large"
+
+
+def interpret_alpha(a: float | None) -> str:
+    if a is None:
+        return "—"
+    if a < 0.5:
+        return "unacceptable"
+    if a < 0.6:
+        return "poor"
+    if a < 0.7:
+        return "questionable"
+    if a < 0.8:
+        return "acceptable"
+    if a < 0.9:
+        return "good"
+    return "excellent"
+
+
+# =============================================================================
+# 4. VALIDATED INSTRUMENTS — reference metadata only
+# =============================================================================
+
+INSTRUMENTS = [
+    {
+        "code": "ATMHPS-AZ",
+        "name": "Attitudes Towards Mental Health Problems Scale (Azerbaijani)",
+        "items": 35,
+        "factors": 7,
+        "measures": "Cultural attitudes and stigma towards mental health problems",
+        "source": "Shahhuseynbayova et al. (2026)",
+        "status": "OSF preprint — check peer-review status before use",
+        "reported_alpha": "0.954 (reported)",
+    },
+    {
+        "code": "RIBS",
+        "name": "Reported and Intended Behaviour Scale",
+        "items": 8,
+        "factors": 2,
+        "measures": "Reported and intended social behaviour toward people with mental illness",
+        "source": "Evans-Lacko et al. (2011)",
+        "status": "Peer-reviewed",
+        "reported_alpha": "see original",
+    },
+    {
+        "code": "PSOSH",
+        "name": "Perceptions of Stigmatization by Others for Seeking Help",
+        "items": 5,
+        "factors": 1,
+        "measures": "Anticipated stigmatization from others when seeking psychological help",
+        "source": "Vogel et al. (2009)",
+        "status": "Peer-reviewed",
+        "reported_alpha": "0.91 (reported)",
+    },
+    {
+        "code": "MHSAS",
+        "name": "Mental Help Seeking Attitudes Scale",
+        "items": 9,
+        "factors": 1,
+        "measures": "General attitudes toward seeking professional psychological help",
+        "source": "Hammer et al. (2018)",
+        "status": "Peer-reviewed",
+        "reported_alpha": "see original",
+    },
+]
+
+
+# =============================================================================
+# 5. MEDIA CODEBOOK (M01–M10) — PICMIN-inspired
+# =============================================================================
+
+CODEBOOK = [
+    ("M01", "Violence frame", "Is mental illness linked with violence in headline or body?"),
+    ("M02", "Dangerousness", "Is the person presented as dangerous to self or others?"),
+    ("M03", "Blame / weakness", "Is the problem framed as personal weakness or moral failure?"),
+    ("M04", "Sensationalism", "Do headline and body use sensationalist language?"),
+    ("M05", "Recovery", "Are recovery, treatment, or improvement possibilities shown?"),
+    ("M06", "Human experience", "Is the lived experience and voice of the person present?"),
+    ("M07", "Agency", "Is the person depicted as an agent making their own decisions?"),
+    ("M08", "Help-seeking", "Is professional help-seeking encouraged or represented?"),
+    ("M09", "Support", "Are family or social support networks shown?"),
+    ("M10", "Respectful language", "Is person-first, non-stigmatizing language used?"),
+]
+
+
+# =============================================================================
+# 6. EVIDENCE LIBRARY — the 10 priority references from the plan
+# =============================================================================
+
+REFERENCES = [
+    {
+        "n": 1,
+        "title": "Interventions to Reduce Mental Health Stigma in Young People",
+        "authors": "Crockett, M. A., et al.",
+        "year": 2025,
+        "meta": "Systematic review · 97 RCTs · 43,852 participants",
+        "role": "Design basis for intervention",
+        "level": "high",
+        "key_finding": "Contact-based and lived-experience interventions outperform information-only approaches for behavioural stigma outcomes.",
+    },
+    {
+        "n": 2,
+        "title": "Psychometric Validation of the Azerbaijani Version of ATMHPS",
+        "authors": "Shahhuseynbayova, N., Bunyatova, A., Mustafayev, M., Kotera, Y.",
+        "year": 2026,
+        "meta": "OSF preprint · N = 946 Azerbaijani university students",
+        "role": "Primary Azerbaijani-language stigma instrument",
+        "level": "med",
+        "key_finding": "Highest subscale: disclosure concerns. Lowest: family attitudes and family burden.",
+    },
+    {
+        "n": 3,
+        "title": "Effect of Web-Based Educational Interventions on Mental Health Literacy, Stigma, Help-Seeking",
+        "authors": "Nazari, A., et al.",
+        "year": 2023,
+        "meta": "Meta-analysis · 20 studies (10 in pooled analysis)",
+        "role": "Baseline for what information-only can/cannot achieve",
+        "level": "high",
+        "key_finding": "Literacy improves (SMD = 0.70); stigma and help-seeking intentions do not (95% CI crosses zero).",
+    },
+    {
+        "n": 4,
+        "title": "Selfie Videos to Reduce Stigma and Increase Treatment Seeking",
+        "authors": "Amsalem, D., et al.",
+        "year": 2023,
+        "meta": "Two RCTs · N = 1,532 · 58–102 s videos",
+        "role": "Short-form, lived-experience video design",
+        "level": "high",
+        "key_finding": "Cohen's d = 0.31–0.76 (Study 1) and 0.13–0.47 (Study 2) for stigma reduction.",
+    },
+    {
+        "n": 5,
+        "title": "Perceived Barriers and Facilitators to Mental Health Help-Seeking",
+        "authors": "Gulliver, A., Griffiths, K. M., Christensen, H.",
+        "year": 2010,
+        "meta": "Systematic review · 22 studies",
+        "role": "Help-seeking barrier taxonomy",
+        "level": "high",
+        "key_finding": "Top barriers: stigma, low symptom recognition, preference for self-reliance, uncertainty about sources.",
+    },
+    {
+        "n": 6,
+        "title": "The Mental Health Literacy Scale (MHLS)",
+        "authors": "O'Connor, M., Casey, L.",
+        "year": 2015,
+        "meta": "Instrument development · 35 items",
+        "role": "Literacy measurement",
+        "level": "high",
+        "key_finding": "Strong internal and test-retest reliability reported.",
+    },
+    {
+        "n": 7,
+        "title": "Development and Psychometric Properties of RIBS",
+        "authors": "Evans-Lacko, S., et al.",
+        "year": 2011,
+        "meta": "Instrument development · 8 items",
+        "role": "Social distance and behavioural intention",
+        "level": "high",
+        "key_finding": "Two-factor structure (reported behaviour; intended behaviour).",
+    },
+    {
+        "n": 8,
+        "title": "Mass Media Interventions for Reducing Mental Health-Related Stigma",
+        "authors": "Clement, S., et al.",
+        "year": 2013,
+        "meta": "Systematic review · Cochrane-style",
+        "role": "Evidence base for media interventions",
+        "level": "high",
+        "key_finding": "Mixed evidence; effects strongest for targeted, contact-based media rather than mass awareness.",
+    },
+    {
+        "n": 9,
+        "title": "Development of the PICMIN Instrument (Picture of Mental Illness in Newspapers)",
+        "authors": "PICMIN Consortium",
+        "year": 2012,
+        "meta": "Codebook · Krippendorff's α > 0.75 across 622 articles (3 countries)",
+        "role": "Media content coding framework",
+        "level": "high",
+        "key_finding": "10 analytic categories with strong inter-coder reliability.",
+    },
+    {
+        "n": 10,
+        "title": "A New Podcast for Reducing Stigma Against People Living with Mental Illness (Co-Design)",
+        "authors": "Carrotte, E. R., et al.",
+        "year": 2022,
+        "meta": "Co-design study",
+        "role": "Podcast format and co-design methodology",
+        "level": "med",
+        "key_finding": "Co-designed lived-experience podcasts show strong acceptability and perceived impact.",
+    },
+]
+
+
+# =============================================================================
+# 7. SYNTHETIC DATA GENERATORS (clearly labeled as illustrative)
+# =============================================================================
+
+@st.cache_data(show_spinner=False)
+def synth_survey(n: int = 200) -> pd.DataFrame:
+    """Synthetic survey data mimicking the study design.
+
+    IMPORTANT: this is *not* real data. It exists only to demonstrate
+    the analysis pipeline. Item scales and directions are approximate.
+    """
+    rng = np.random.default_rng(RNG_SEED)
+    n_half = n // 2
+
+    age_group = rng.choice(["18–21", "22–25", "26–29"], size=n, p=[0.35, 0.4, 0.25])
+    education = rng.choice(["Undergraduate", "Graduate", "Other"], size=n, p=[0.6, 0.3, 0.1])
+    region = rng.choice(["Baku", "Ganja", "Sumqayit", "Other"], size=n, p=[0.55, 0.15, 0.15, 0.15])
+    group = np.array(["Intervention"] * n_half + ["Control"] * (n - n_half))
+    rng.shuffle(group)
+    wave = rng.choice(["T0", "T1", "T2"], size=n, p=[0.34, 0.33, 0.33])
+
+    def gen_items(n, k, lo, hi, sd_shift=0.0, group_shift=None):
+        base = rng.normal(0, 1, size=(n, 1))
+        items = base + rng.normal(0, sd_shift, size=(n, k))
+        if group_shift is not None:
+            items = items + group_shift
+        scaled = np.clip(np.round(items + (lo + hi) / 2), lo, hi)
+        return scaled.astype(int)
+
+    df = pd.DataFrame({
+        "response_id": [f"R{i:04d}" for i in range(1, n + 1)],
+        "age_group": age_group,
+        "education": education,
+        "region": region,
+        "group": group,
+        "survey_wave": wave,
+    })
+
+    # 35 ATMHPS items (0–4)
+    atm = gen_items(n, 35, 0, 4, sd_shift=0.5)
+    for i in range(35):
+        df[f"atm{i+1:02d}"] = atm[:, i]
+
+    # 8 RIBS items (1–5)
+    ribs = gen_items(n, 8, 1, 5, sd_shift=0.6)
+    for i in range(8):
+        df[f"ribs{i+1:02d}"] = ribs[:, i]
+
+    # 5 PSOSH items (1–5), slightly higher for control group
+    psosh = gen_items(n, 5, 1, 5, sd_shift=0.5,
+                      group_shift=np.where(group == "Control", 0.2, 0))
+    for i in range(5):
+        df[f"psosh{i+1:02d}"] = psosh[:, i]
+
+    # 9 MHSAS items (1–7)
+    mhsas = gen_items(n, 9, 1, 7, sd_shift=0.6)
+    for i in range(9):
+        df[f"mhsas{i+1:02d}"] = mhsas[:, i]
+
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def synth_media(n_articles: int = 60, n_coders: int = 2) -> pd.DataFrame:
+    """Synthetic media articles coded by two independent coders."""
+    rng = np.random.default_rng(RNG_SEED + 1)
+    sources = ["525.az", "Qafqazinfo", "APA", "Report", "Trend", "News.az"]
+    rows = []
+    for i in range(1, n_articles + 1):
+        article = {
+            "article_id": f"A{i:03d}",
+            "source": rng.choice(sources),
+            "publication_date": pd.Timestamp("2024-01-01") + pd.Timedelta(days=int(rng.integers(0, 365))),
+        }
+        for code, _, _ in CODEBOOK:
+            # Two coders with ~80% agreement
+            base = rng.integers(0, 2)
+            coder1 = int(base)
+            coder2 = int(base) if rng.random() < 0.82 else int(1 - base)
+            article[f"{code}_coder1"] = coder1
+            article[f"{code}_coder2"] = coder2
+        rows.append(article)
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(show_spinner=False)
+def synth_intervention(n: int = 220) -> pd.DataFrame:
+    """Synthetic pre/post/follow-up data for a two-arm trial."""
+    rng = np.random.default_rng(RNG_SEED + 2)
+    n_half = n // 2
+    group = np.array(["Intervention"] * n_half + ["Control"] * (n - n_half))
+    rng.shuffle(group)
+
+    # PSOSH — higher = more anticipated stigma; intervention should lower it
+    baseline = rng.normal(3.4, 0.7, size=n)
+    post = baseline + np.where(group == "Intervention", rng.normal(-0.35, 0.5, size=n),
+                               rng.normal(-0.05, 0.5, size=n))
+    follow = post + rng.normal(0.05, 0.4, size=n)
+
+    return pd.DataFrame({
+        "response_id": [f"P{i:04d}" for i in range(1, n + 1)],
+        "group": group,
+        "psosh_baseline": np.clip(baseline, 1, 5),
+        "psosh_post": np.clip(post, 1, 5),
+        "psosh_followup": np.clip(follow, 1, 5),
+    })
+
+
+# =============================================================================
+# 8. UI COMPONENTS
+# =============================================================================
+
+def synth_banner(text: str = "SYNTHETIC / ILLUSTRATIVE DATA — not real participants") -> None:
+    st.markdown(f'<div class="synth-banner">⚠ {text}</div>', unsafe_allow_html=True)
+
+
+def info_box(text: str) -> None:
+    st.markdown(f'<div class="info-box">{text}</div>', unsafe_allow_html=True)
+
+
+def danger_box(text: str) -> None:
+    st.markdown(f'<div class="danger-box">{text}</div>', unsafe_allow_html=True)
+
+
+def success_box(text: str) -> None:
+    st.markdown(f'<div class="success-box">{text}</div>', unsafe_allow_html=True)
+
+
+def pull_quote(text: str) -> None:
+    st.markdown(f'<div class="pull-quote">“{text}”</div>', unsafe_allow_html=True)
+
+
+def stat_card(label: str, value: str, note: str = "") -> None:
+    note_html = f'<div class="note">{note}</div>' if note else ""
+    st.markdown(
+        f'<div class="stat-card"><div class="label">{label}</div>'
+        f'<div class="value">{value}</div>{note_html}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def evidence_badge(level: str) -> str:
+    cls = {"high": "badge-high", "med": "badge-med", "low": "badge-low"}.get(level, "badge-med")
+    label = {"high": "Peer-reviewed", "med": "Preprint / mixed", "low": "Low"}.get(level, level)
+    return f'<span class="badge {cls}">{label}</span>'
+
+
+def style_plotly(fig: go.Figure, height: int = 380) -> go.Figure:
+    fig.update_layout(
+        template="plotly_white",
+        font_family="Inter",
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        height=height,
+        margin=dict(l=20, r=20, t=40, b=20),
+        colorway=[BRAND["teal"], BRAND["amber"], BRAND["navy"], BRAND["danger"]],
+    )
+    return fig
+
+
+# =============================================================================
+# 9. PAGES
+# =============================================================================
+
+def render_home() -> None:
+    st.markdown(
+        """
+        <div class="hero">
+            <div class="hero-kicker">B E Y O N D &nbsp; T H E &nbsp; U N H E A R D</div>
+            <div class="hero-title">What remains<br>unheard?</div>
+            <p class="hero-sub">
+                Mental health is not only a medical issue. It is also a human story — of silence,
+                fear, hope, and the courage to speak. This platform is a research and media
+                prototype investigating how narratives shape stigma and help-seeking in Azerbaijan.
+            </p>
+            <div class="hero-tags">RESEARCH · MEDIA · EVIDENCE · ETHICS</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    st.markdown("#### Analytical Reflection Question")
-    st.write(selected_story["research_prompt"])
-
-# =====================================================================
-# 10. SECTION 04 — RESEARCH LAB (DEEP, TRANSPARENT, NON-FABRICATED)
-# =====================================================================
-
-elif page == "04 · Research Lab":
-    st.markdown('<div class="kicker">EMPIRICAL TEXT & PSYCHOLOGICAL-DISCOURSE LAB</div>', unsafe_allow_html=True)
-    st.header("Research Lab: Transparent Narrative & Text Analysis")
+    st.markdown("### Research question")
     st.markdown(
-        "Analyze narrative records using transparent structural and lexical metrics "
-        "grounded in psychological and communication frameworks. All numbers are "
-        "computed directly from the active dataset—no synthetic scores or "
-        "unverified reliability values are inserted."
+        "> *How do media narratives influence mental health stigma, social attitudes, "
+        "and help-seeking intentions among young adults in Azerbaijan, and can "
+        "evidence-based storytelling improve these outcomes?*"
     )
 
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### Research Lab Data Controls")
-    uploaded_file = st.sidebar.file_uploader(
-        "Upload CSV or ZIP archive",
-        type=["csv", "zip"],
-        help="Upload a CSV with a text/narrative column or a ZIP containing transcript CSVs.",
-    )
-    use_default_sample = st.sidebar.checkbox(
-        "Load built-in illustrative research corpus",
-        value=(uploaded_file is None),
-        help="Uses 8 illustrative bilingual (EN/AZ) narrative rows when no file is uploaded.",
-    )
-    min_tokens = st.sidebar.slider(
-        "Minimum token count filter",
-        min_value=0,
-        max_value=300,
-        value=1,
-        step=1,
-    )
-
-    if uploaded_file is None and not use_default_sample:
-        st.info("Upload a CSV/ZIP file or enable the built-in illustrative corpus in the sidebar.")
-        st.stop()
-
-    try:
-        if uploaded_file is not None:
-            raw_bytes = uploaded_file.getvalue()
-            source_hash = hashlib.sha256(raw_bytes).hexdigest()[:12]
-            source_label = f"Uploaded: {uploaded_file.name} ({source_hash})"
-            if uploaded_file.name.lower().endswith(".zip"):
-                raw_df, skipped_zip = parse_zip_archive(raw_bytes)
-                if skipped_zip > 0:
-                    st.caption(f"Note: {skipped_zip} non-matching or empty CSV file(s) inside ZIP were skipped.")
-            else:
-                csv_df = read_csv_safely(raw_bytes, uploaded_file.name)
-                raw_df = normalize_uploaded_csv(csv_df)
-        else:
-            raw_df = DEFAULT_RESEARCH_CORPUS.copy()
-            source_label = "Built-in Illustrative Research Corpus (8 rows, EN/AZ)"
-
-        agg_df = aggregate_by_participant(raw_df)
-        filtered_df = agg_df[
-            agg_df["text"].str.len().gt(0) & agg_df["token_count"].ge(min_tokens)
-        ].reset_index(drop=True)
-
-        if filtered_df.empty:
-            st.warning("No records match the current text and minimum token filter.")
-            st.stop()
-
-        analyzed_df = compute_lexical_features(filtered_df)
-        rate_cols: List[str] = analyzed_df.attrs.get("rate_columns", [])
-
-        st.caption(f"**Active Source:** {source_label} · **Eligible Records:** {len(analyzed_df)}")
-
-        # --- Sub-panel A: Structural & Lexical Overview ---
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Records Analyzed", f"{len(analyzed_df)}")
-        m2.metric("Mean Tokens / Record", f"{analyzed_df['token_count'].mean():.1f}")
-        m3.metric("Median Tokens / Record", f"{analyzed_df['token_count'].median():.1f}")
-        m4.metric("Mean Sentence Length", f"{analyzed_df['avg_sentence_length'].mean():.1f} tok")
-
-        st.markdown("#### Lexical Category Rates (Occurrences per 100 Tokens)")
-        st.caption(
-            "Descriptive word-list rates only. High or low rates do not diagnose "
-            "psychological states or prove causal mechanisms."
-        )
-        if rate_cols:
-            mean_rates = analyzed_df[rate_cols].mean().sort_values(ascending=False)
-            st.bar_chart(mean_rates, use_container_width=True)
-
-        # --- Sub-panel B: Inter-Rater Agreement (Only if rater_1 & rater_2 exist) ---
-        st.markdown("#### Human Coding & Inter-Rater Reliability Check")
-        kappa_res = compute_cohens_kappa(analyzed_df["rater_1"], analyzed_df["rater_2"])
-        if kappa_res["available"]:
-            k1, k2, k3 = st.columns(3)
-            k1.metric("Paired Coded Items", f"{kappa_res['n_paired']}")
-            k2.metric("Observed Agreement", f"{kappa_res['observed_agreement']:.4f}")
-            k3.metric(
-                "Cohen's Kappa (κ)",
-                f"{kappa_res['kappa']:.4f}" if kappa_res["kappa"] is not None else "N/A",
-            )
-            st.caption(kappa_res["note"])
-        else:
-            st.info(kappa_res["note"])
-
-        # --- Sub-panel C: Exploratory Non-Clinical Correlations (If present) ---
-        assoc_res = compute_exploratory_associations(analyzed_df)
-        with st.expander("Exploratory Quantitative Associations (If Score/Binary Columns Supplied)"):
-            if assoc_res["spearman"] is not None:
-                sp = assoc_res["spearman"]
-                p_txt = f", p = {sp['p_value']}" if sp["p_value"] is not None else ""
-                st.write(f"- **Spearman correlation (token count vs. numeric score, n={sp['n']}):** r_s = {sp['rho']}{p_txt}")
-            else:
-                st.write("- **Spearman correlation:** Not computed (requires at least 3 non-missing numeric score rows with variance).")
-
-            if assoc_res["mann_whitney_tokens"] is not None:
-                mw = assoc_res["mann_whitney_tokens"]
-                st.write(
-                    f"- **Mann–Whitney U test on token count (group 0 n={mw['n_0']} vs. group 1 n={mw['n_1']}):** "
-                    f"U = {mw['u_stat']}, p = {mw['p_value']} (two-sided, descriptive only)."
-                )
-            else:
-                st.write("- **Mann–Whitney U test:** Not computed (requires at least 2 records in both binary groups 0 and 1).")
-
-        # --- Sub-panel D: Optional Secondary TF-IDF Cross-Validation ---
-        with st.expander("Secondary Methodological Check: Out-of-Fold TF-IDF + Logistic Regression"):
-            st.caption(
-                "Exploratory text-classification benchmark only. Internal cross-validation "
-                "does not establish external validity or clinical utility."
-            )
-            if st.button("Run Out-of-Fold Cross-Validation", type="primary"):
-                try:
-                    cv_res = run_exploratory_tfidf_cv(analyzed_df)
-                    st.session_state["cv_res"] = cv_res
-                except Exception as cv_err:
-                    st.session_state.pop("cv_res", None)
-                    st.error(str(cv_err))
-
-            if "cv_res" in st.session_state:
-                r = st.session_state["cv_res"]
-                c_a, c_b, c_c, c_d = st.columns(4)
-                c_a.metric("Balanced Accuracy", f"{r['balanced_accuracy']:.4f}")
-                c_b.metric("Macro F1", f"{r['macro_f1']:.4f}")
-                c_c.metric("ROC AUC", f"{r['roc_auc']:.4f}" if not np.isnan(r["roc_auc"]) else "N/A")
-                c_d.metric("Brier Score", f"{r['brier_score']:.4f}")
-                st.dataframe(r["predictions"], use_container_width=True, hide_index=True)
-
-        # --- Sub-panel E: Detailed Record Table & Export ---
-        st.markdown("#### Record-Level Analytical Table")
-        display_cols = [
-            "participant_id",
-            "theme",
-            "token_count",
-            "avg_sentence_length",
-            "first_person_singular_per100",
-            "restraint_and_non_disclosure_per100",
-            "stigma_and_judgment_per100",
-            "help_seeking_and_care_per100",
-            "tentative_and_hedging_per100",
-            "sdt_autonomy_competence_relatedness_per100",
-            "text",
-        ]
-        present_cols = [c for c in display_cols if c in analyzed_df.columns]
-        st.dataframe(analyzed_df[present_cols], use_container_width=True, hide_index=True)
-
-        export_payload = {
-            "project": "The Neurometric Gaze — Beyond the Unheard",
-            "source": source_label,
-            "records_analyzed": int(len(analyzed_df)),
-            "mean_token_count": round(float(analyzed_df["token_count"].mean()), 2),
-            "lexical_rates_per_100_tokens_mean": {
-                col: round(float(analyzed_df[col].mean()), 3) for col in rate_cols
-            },
-            "cohens_kappa": kappa_res,
-            "non_diagnostic_caveat": (
-                "Descriptive lexical/structural metrics only; not a clinical "
-                "diagnosis or direct measure of internal emotions."
-            ),
-        }
-
-        d1, d2 = st.columns(2)
-        with d1:
-            st.download_button(
-                "Download Analyzed Table (CSV)",
-                analyzed_df[present_cols].to_csv(index=False).encode("utf-8"),
-                file_name="neurometric_gaze_analysis.csv",
-                mime="text/csv",
-            )
-        with d2:
-            st.download_button(
-                "Download Research Summary (JSON)",
-                json.dumps(export_payload, indent=2, ensure_ascii=False).encode("utf-8"),
-                file_name="neurometric_gaze_summary.json",
-                mime="application/json",
-            )
-
-    except Exception as exc:
-        st.error(f"Dataset processing error: {exc}")
-
-# =====================================================================
-# 11. SECTION 05 — EVIDENCE LIBRARY & PSYCHOLOGICAL FRAMEWORKS
-# =====================================================================
-
-elif page == "05 · Evidence Library":
-    st.markdown('<div class="kicker">THEORETICAL & EMPIRICAL FOUNDATIONS</div>', unsafe_allow_html=True)
-    st.header("Evidence Library & Psychological Frameworks")
-    st.markdown(
-        "Explore established frameworks from psychology, narrative medicine, "
-        "and health communication alongside their explicit analytical boundaries."
-    )
-
-    tab_fw, tab_ev = st.tabs(["Psychological & Communication Theories", "Verified Claim & Boundary Ledger"])
-
-    with tab_fw:
-        fw_names = [f["title"] for f in PSYCHOLOGICAL_FRAMEWORKS]
-        chosen_fw_name = st.selectbox("Inspect framework", fw_names)
-        fw = next(item for item in PSYCHOLOGICAL_FRAMEWORKS if item["title"] == chosen_fw_name)
-
+    c1, c2, c3 = st.columns(3, gap="large")
+    with c1:
         st.markdown(
-            f"""
-            <div class="teal-card">
-                <div class="kicker">{fw["theorists"]}</div>
-                <h3>{fw["title"]}</h3>
-                <p><strong>Core Premise:</strong> {fw["core_premise"]}</p>
-                <p><strong>Application in This Prototype:</strong> {fw["text_application"]}</p>
-                <p><strong>Methodological Boundary:</strong> {fw["limitation"]}</p>
-            </div>
-            """,
+            '<div class="pillar"><div class="num">01 — MODULE A</div>'
+            '<h3>Media Content Analysis</h3>'
+            '<p>How does Azerbaijani media frame mental health? We apply a PICMIN-based '
+            'codebook with 10 categories and compute inter-coder reliability.</p></div>',
+            unsafe_allow_html=True,
+        )
+    with c2:
+        st.markdown(
+            '<div class="pillar"><div class="num">02 — MODULE B</div>'
+            '<h3>Youth Survey</h3>'
+            '<p>Validated instruments (ATMHPS-AZ, RIBS, PSOSH, MHSAS) measure stigma, '
+            'social distance, anticipated stigma, and help-seeking attitudes.</p></div>',
+            unsafe_allow_html=True,
+        )
+    with c3:
+        st.markdown(
+            '<div class="pillar"><div class="num">03 — MODULE C</div>'
+            '<h3>Intervention Evaluation</h3>'
+            '<p>Two-arm design (intervention vs. control) with T0 / T1 / T2 waves, '
+            'effect size, and 95% CI reporting.</p></div>',
             unsafe_allow_html=True,
         )
 
-    with tab_ev:
-        domains = ["All"] + sorted({e["evidence_type"] for e in EVIDENCE_CATALOG})
-        sel_dom = st.selectbox("Filter by evidence type", domains)
-        items = EVIDENCE_CATALOG if sel_dom == "All" else [e for e in EVIDENCE_CATALOG if e["evidence_type"] == sel_dom]
+    st.markdown("<br>", unsafe_allow_html=True)
+    pull_quote("The project is not about building a prettier dashboard. "
+               "It is about testing whether a story can move a needle.")
 
-        for ev in items:
+    st.divider()
+
+    st.markdown("### Design principles")
+    col1, col2 = st.columns(2)
+    with col1:
+        success_box(
+            "<strong>What we do:</strong><br>"
+            "• Use validated instruments with published psychometrics<br>"
+            "• Report N, effect size, and 95% CI for every finding<br>"
+            "• Label every synthetic number as SYNTHETIC<br>"
+            "• Distinguish preprints from peer-reviewed evidence<br>"
+            "• Anonymize all participant stories and quotes"
+        )
+    with col2:
+        danger_box(
+            "<strong>What we do NOT do:</strong><br>"
+            "• No clinical diagnosis, no PHQ-8 as a central feature<br>"
+            "• No fabricated indices (e.g., 'silence_index')<br>"
+            "• No fabricated cross-sectional correlations posing as causal<br>"
+            "• No participant risk scores shown to individuals<br>"
+            "• No 'successful impact' claims without a control group"
+        )
+
+    st.caption(
+        f"© 2026 The Neurometric Gaze · Research prototype · "
+        f"Last updated {datetime.now().strftime('%d %b %Y')} · "
+        "Not a clinical service. If you or someone you know is struggling, "
+        "please contact a licensed mental health professional."
+    )
+
+
+def render_research_question() -> None:
+    st.title("Research Question & Framework")
+
+    st.markdown("### Central research question")
+    info_box(
+        "<strong>How do media narratives influence mental health stigma, social attitudes, "
+        "and help-seeking intentions among young adults in Azerbaijan, and can evidence-"
+        "based storytelling improve these outcomes?</strong>"
+    )
+
+    st.markdown("### Three research objectives")
+    st.markdown(
+        "**Objective 1 — Media Content Analysis (Module A)**<br>"
+        "Identify stigmatizing and anti-stigmatizing narratives in Azerbaijani media coverage "
+        "of mental health using a validated codebook.",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "**Objective 2 — Youth Survey (Module B)**<br>"
+        "Measure stigma, mental health literacy, social distance, anticipated stigma, and "
+        "help-seeking attitudes among 18–29 year-old young adults using validated instruments.",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "**Objective 3 — Intervention Evaluation (Module C)**<br>"
+        "Assess the effect of an evidence-based, narrative-driven media intervention on the "
+        "same outcomes, using a two-arm design with T0 / T1 / T2 measurement waves.",
+        unsafe_allow_html=True,
+    )
+
+    st.divider()
+    st.markdown("### Theoretical grounding")
+    st.markdown(
+        "The project draws on three converging evidence streams:"
+    )
+    st.markdown(
+        "1. **Contact hypothesis** — direct or mediated contact with people with lived "
+        "experience reduces prejudice more effectively than information alone "
+        "(Crockett et al., 2025; Amsalem et al., 2023).\n"
+        "2. **Behavioural vs. attitudinal change** — knowledge and attitudes change more "
+        "easily than behaviour; the reporting plan treats these as separate outcomes "
+        "(Nazari et al., 2023).\n"
+        "3. **Help-seeking as a social decision** — disclosure concerns and anticipated "
+        "stigma are strong predictors of help-seeking, especially in collectivist contexts "
+        "(Shahhuseynbayova et al., 2026; Gulliver et al., 2010)."
+    )
+
+    st.divider()
+    st.markdown("### Why not an AI diagnostic tool?")
+    danger_box(
+        "A diagnostic-AI framing (e.g., predicting depression from text) is scientifically "
+        "infeasible at the sample sizes achievable in this project, ethically fraught, and "
+        "misaligned with the research question. The question is about <em>media and society</em>, "
+        "not about individual diagnosis. We therefore deliberately exclude PHQ-8 and any "
+        "individual-level risk score."
+    )
+
+
+def render_media_analysis() -> None:
+    st.title("Module A — Media Content Analysis")
+    synth_banner()
+
+    st.markdown(
+        "This module applies a PICMIN-inspired codebook (10 categories) to Azerbaijani media "
+        "articles about mental health. Each article is independently coded by two researchers; "
+        "inter-coder reliability is computed with Krippendorff's alpha (nominal)."
+    )
+
+    with st.expander("📖 Codebook (M01–M10)", expanded=True):
+        for code, name, desc in CODEBOOK:
             st.markdown(
-                f"""
-                <div class="scholar-card">
-                    <span class="badge">{ev["evidence_type"]}</span>
-                    <span class="amber-badge">{ev["framework"]}</span>
-                    <h4>{ev["claim"]}</h4>
-                    <p><strong>Analytical Boundary:</strong> {ev["boundary"]}</p>
-                </div>
-                """,
+                f'<div class="codebook-row">'
+                f'<div class="code"><code>{code}</code></div>'
+                f'<div class="name">{name}</div>'
+                f'<div class="desc">{desc}</div>'
+                f'</div>',
                 unsafe_allow_html=True,
             )
 
-# =====================================================================
-# 12. SECTION 06 — THE INTERVENTION (MEDIA & COMMUNICATION)
-# =====================================================================
+    st.divider()
+    st.markdown("### Inter-coder reliability (synthetic demonstration)")
+    df = synth_media()
 
-elif page == "06 · The Intervention":
-    st.markdown('<div class="kicker">PUBLIC HEALTH & MEDIA INTERVENTION</div>', unsafe_allow_html=True)
-    st.header("The Intervention: Documentary, Podcast & Campaign")
+    alphas = []
+    for code, name, _ in CODEBOOK:
+        arr = df[[f"{code}_coder1", f"{code}_coder2"]].values.astype(float)
+        a = krippendorff_alpha_nominal(arr)
+        alphas.append({"code": code, "name": name, "alpha": a})
+
+    alpha_df = pd.DataFrame(alphas)
+
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        fig = px.bar(
+            alpha_df, x="code", y="alpha",
+            color="alpha",
+            color_continuous_scale=["#EBE6DC", "#5C8581", "#14243A"],
+            text=alpha_df["alpha"].round(2),
+        )
+        fig.update_traces(textposition="outside")
+        fig.update_layout(coloraxis_showscale=False, yaxis_range=[0, 1.05],
+                          yaxis_title="Krippendorff's α")
+        fig.add_hline(y=0.75, line_dash="dash", line_color=BRAND["amber"],
+                      annotation_text="α = 0.75 (acceptable threshold)")
+        st.plotly_chart(style_plotly(fig, 400), use_container_width=True)
+    with col2:
+        mean_alpha = float(alpha_df["alpha"].mean())
+        stat_card(
+            "Mean α (10 codes)",
+            f"{mean_alpha:.3f}",
+            "Illustrative only. Real reliability requires actual double-coded sample.",
+        )
+
+    st.markdown("### Frequency of each code (synthetic)")
+    freq_rows = []
+    for code, name, _ in CODEBOOK:
+        pct = df[f"{code}_coder1"].mean() * 100
+        freq_rows.append({"code": code, "name": name, "prevalence_pct": pct})
+    freq_df = pd.DataFrame(freq_rows).sort_values("prevalence_pct", ascending=True)
+
+    fig2 = px.bar(
+        freq_df, x="prevalence_pct", y="name", orientation="h",
+        color="prevalence_pct",
+        color_continuous_scale=["#EBE6DC", "#5C8581", "#14243A"],
+        text=freq_df["prevalence_pct"].round(1),
+    )
+    fig2.update_traces(texttemplate="%{text}%", textposition="outside")
+    fig2.update_layout(coloraxis_showscale=False, xaxis_title="% of articles")
+    st.plotly_chart(style_plotly(fig2, 420), use_container_width=True)
+
+    st.divider()
+    st.markdown("### What this analysis will report (once real data exist)")
     st.markdown(
-        "Designed for **Harvard MS-MMH** alignment: combining empirical and "
-        "narrative inquiry with concrete media artifacts aimed at reducing stigma "
-        "and supporting informed help-seeking."
+        "- Krippendorff's α per code (target: ≥ 0.75)<br>"
+        "- Frequency of each code across the corpus<br>"
+        "- Cross-tabulation by outlet / article type / region<br>"
+        "- Qualitative excerpts with anonymized source IDs<br>"
+        "- Explicit coding notes and coder IDs for audit".replace("\n", "\n"),
+        unsafe_allow_html=True,
     )
 
-    t1, t2, t3 = st.tabs(["Short Documentary (5–8 min)", "3-Episode Podcast Series", "Awareness Campaign Planner"])
 
-    with t1:
-        st.markdown("### Short Documentary Proposal: *Beyond the Unheard*")
+def render_survey() -> None:
+    st.title("Module B — Youth Survey")
+    synth_banner()
+
+    st.markdown(
+        "The survey uses **only validated instruments**. We do not invent new scales. "
+        "The table below lists the four primary instruments."
+    )
+
+    for inst in INSTRUMENTS:
+        with st.expander(f"📋 {inst['code']} — {inst['name']}", expanded=False):
+            st.markdown(
+                f"**Items:** {inst['items']}  \n"
+                f"**Factors:** {inst['factors']}  \n"
+                f"**Measures:** {inst['measures']}  \n"
+                f"**Source:** {inst['source']}  \n"
+                f"**Status:** {inst['status']}  \n"
+                f"**Reported reliability:** {inst['reported_alpha']}"
+            )
+
+    st.divider()
+    st.markdown("### Psychometric demonstration (synthetic data)")
+    info_box(
+        "The values below are computed live on **synthetic** responses. "
+        "Their purpose is to demonstrate that the analysis pipeline works, "
+        "not to report real psychometric findings."
+    )
+
+    survey = synth_survey()
+
+    # Split into instrument blocks
+    atm_items = survey[[c for c in survey.columns if c.startswith("atm")]]
+    ribs_items = survey[[c for c in survey.columns if c.startswith("ribs")]]
+    psosh_items = survey[[c for c in survey.columns if c.startswith("psosh")]]
+    mhsas_items = survey[[c for c in survey.columns if c.startswith("mhsas")]]
+
+    blocks = [
+        ("ATMHPS-AZ", atm_items),
+        ("RIBS", ribs_items),
+        ("PSOSH", psosh_items),
+        ("MHSAS", mhsas_items),
+    ]
+
+    rows = []
+    for name, block in blocks:
+        a = cronbach_alpha(block)
+        w = mcdonald_omega_approx(block)
+        rows.append({
+            "Instrument": name,
+            "Items": block.shape[1],
+            "N (complete)": int(block.dropna().shape[0]),
+            "Cronbach's α": a,
+            "McDonald's ω (approx.)": w,
+            "α interpretation": interpret_alpha(a),
+        })
+    rel_df = pd.DataFrame(rows)
+
+    st.dataframe(
+        rel_df.style.format({
+            "Cronbach's α": "{:.3f}",
+            "McDonald's ω (approx.)": "{:.3f}",
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.caption(
+        "Cronbach's α and approximate McDonald's ω are computed live. "
+        "For publication, McDonald's ω should be estimated from a CFA-fitted "
+        "model (e.g., `semopy` or `lavaan`) with a pre-registered factor structure."
+    )
+
+    st.divider()
+    st.markdown("### Composite score distributions (synthetic)")
+
+    comp = pd.DataFrame({
+        "ATMHPS total (mean)": atm_items.mean(axis=1),
+        "RIBS total (mean)": ribs_items.mean(axis=1),
+        "PSOSH total (mean)": psosh_items.mean(axis=1),
+        "MHSAS total (mean)": mhsas_items.mean(axis=1),
+        "Group": survey["group"],
+    })
+
+    tab1, tab2, tab3, tab4 = st.tabs(["ATMHPS", "RIBS", "PSOSH", "MHSAS"])
+    for tab, col in zip(
+        [tab1, tab2, tab3, tab4],
+        ["ATMHPS total (mean)", "RIBS total (mean)", "PSOSH total (mean)", "MHSAS total (mean)"],
+    ):
+        with tab:
+            fig = px.histogram(
+                comp, x=col, color="Group", nbins=20,
+                color_discrete_map={"Intervention": BRAND["teal"], "Control": BRAND["amber"]},
+                barmode="overlay", opacity=0.75,
+            )
+            fig.update_layout(xaxis_title=col, yaxis_title="count")
+            st.plotly_chart(style_plotly(fig, 320), use_container_width=True)
+
+    st.divider()
+    st.markdown("### Data dictionary")
+    st.markdown(
+        "| Variable | Type | Description |\n"
+        "|---|---|---|\n"
+        "| `response_id` | string | Anonymous unique identifier |\n"
+        "| `age_group` | category | 18–21, 22–25, 26–29 |\n"
+        "| `education` | category | Undergraduate / Graduate / Other |\n"
+        "| `region` | category | Broad geographic region |\n"
+        "| `group` | category | Intervention / Control |\n"
+        "| `survey_wave` | category | T0 / T1 / T2 |\n"
+        "| `atm01`–`atm35` | int | ATMHPS-AZ items (0–4; check reverse-coding) |\n"
+        "| `ribs01`–`ribs08` | int | RIBS items (1–5) |\n"
+        "| `psosh01`–`psosh05` | int | PSOSH items (1–5; higher = more anticipated stigma) |\n"
+        "| `mhsas01`–`mhsas09` | int | MHSAS items (1–7; higher = more favourable) |"
+    )
+
+
+def render_intervention() -> None:
+    st.title("Module C — Intervention Evaluation")
+    synth_banner()
+
+    st.markdown(
+        "The intervention is evaluated with a **two-arm design** with T0 (baseline), "
+        "T1 (immediately post), and T2 (4-week follow-up). The primary outcome is "
+        "**anticipated stigma (PSOSH)**; secondary outcomes include RIBS, MHSAS, and "
+        "ATMHPS subscales."
+    )
+
+    st.markdown("### Design")
+    col1, col2 = st.columns(2)
+    with col1:
+        success_box(
+            "<strong>Intervention arm</strong><br>"
+            "• Lived-experience short film (5–8 min) + 60–100 s clips<br>"
+            "• 3-episode co-designed podcast<br>"
+            "• Signposting to validated mental health resources"
+        )
+    with col2:
+        info_box(
+            "<strong>Control arm</strong><br>"
+            "• Neutral, fact-based information leaflet<br>"
+            "• Signposting to the same resources<br>"
+            "• Same duration and format to balance contact time"
+        )
+
+    st.divider()
+    st.markdown("### Power analysis (interactive)")
+    st.markdown(
+        "We pre-specify the target effect size and required power. The sample-size "
+        "calculator uses a two-sample t-test approximation."
+    )
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        d = st.slider("Expected effect size (Cohen's d)", 0.10, 0.80, 0.30, 0.05)
+    with col2:
+        power_target = st.slider("Target power", 0.70, 0.95, 0.80, 0.01)
+    with col3:
+        attrition = st.slider("Attrition (to inflate N)", 0.0, 0.35, 0.15, 0.01)
+
+    n_per_arm = sample_size_two_arm(d, alpha=0.05, power=power_target)
+    n_total_raw = n_per_arm * 2
+    n_total_inflated = int(math.ceil(n_total_raw / (1 - attrition)))
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        stat_card("Per arm", f"{n_per_arm}", "primary analysis sample")
+    with col2:
+        stat_card("Total (raw)", f"{n_total_raw}", "before attrition")
+    with col3:
+        stat_card("Total (inflated)", f"{n_total_inflated}", f"+{int(attrition*100)}% attrition")
+
+    ns = np.arange(30, max(500, n_per_arm * 2), 20)
+    curve = power_curve(d, ns)
+    fig = px.line(curve, x="n_per_arm", y="power", markers=False)
+    fig.add_hline(y=power_target, line_dash="dash", line_color=BRAND["amber"],
+                  annotation_text=f"Target power = {power_target:.2f}")
+    fig.add_vline(x=n_per_arm, line_dash="dash", line_color=BRAND["teal"],
+                  annotation_text=f"n = {n_per_arm}")
+    fig.update_layout(xaxis_title="n per arm", yaxis_title="power",
+                      yaxis_range=[0, 1.02])
+    st.plotly_chart(style_plotly(fig, 380), use_container_width=True)
+
+    st.caption(
+        "For a definitive sample-size calculation, use G*Power or an R-based "
+        "approach (`pwr::pwr.t.test`) with the primary outcome, ICC (if clustered), "
+        "and expected attrition clearly specified."
+    )
+
+    st.divider()
+    st.markdown("### Pre/post / follow-up analysis (synthetic demo)")
+    df = synth_intervention()
+
+    fig = go.Figure()
+    for grp, color in [("Intervention", BRAND["teal"]), ("Control", BRAND["amber"])]:
+        sub = df[df["group"] == grp]
+        means = [sub["psosh_baseline"].mean(), sub["psosh_post"].mean(), sub["psosh_followup"].mean()]
+        sems = [sub["psosh_baseline"].sem(), sub["psosh_post"].sem(), sub["psosh_followup"].sem()]
+        fig.add_trace(go.Scatter(
+            x=["T0", "T1", "T2"], y=means, mode="lines+markers", name=grp,
+            line=dict(color=color, width=3),
+            marker=dict(size=10),
+            error_y=dict(type="data", array=sems, visible=True),
+        ))
+    fig.update_layout(yaxis_title="PSOSH mean (higher = more anticipated stigma)",
+                      xaxis_title="Measurement wave")
+    st.plotly_chart(style_plotly(fig, 380), use_container_width=True)
+
+    # Paired effect within intervention arm
+    int_arm = df[df["group"] == "Intervention"]
+    d_z = paired_cohens_d(int_arm["psosh_baseline"], int_arm["psosh_post"])
+    t_stat, p_val = stats.ttest_rel(int_arm["psosh_baseline"], int_arm["psosh_post"])
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        stat_card("Paired t", f"{t_stat:.2f}", f"p = {p_val:.4f}")
+    with col2:
+        stat_card("Cohen's d_z", f"{d_z:.2f}" if d_z is not None else "—",
+                  interpret_d(d_z))
+    with col3:
+        stat_card("N (intervention)", f"{len(int_arm)}", "synthetic")
+
+    st.caption(
+        "This is a within-arm pre/post test on synthetic data. In the real "
+        "analysis, the primary test is an ANCOVA comparing arms at T1 with T0 "
+        "as a covariate, per the pre-registered analysis plan."
+    )
+
+
+def render_stats_lab() -> None:
+    st.title("Statistical Analysis Lab")
+    synth_banner()
+
+    st.markdown(
+        "An interactive workspace for verifying each statistical primitive used "
+        "elsewhere in the platform."
+    )
+
+    tabs = st.tabs(["Reliability", "Effect size", "Inter-rater", "Correlation", "Power"])
+
+    with tabs[0]:
+        st.markdown("#### Cronbach's α and McDonald's ω")
+        st.markdown("Enter a small matrix of item responses (rows = participants).")
+        default_data = pd.DataFrame(
+            [[3, 4, 3, 5], [2, 3, 4, 3], [4, 4, 5, 4], [3, 2, 3, 3], [5, 5, 4, 5]],
+            columns=["Item1", "Item2", "Item3", "Item4"],
+        )
+        edited = st.data_editor(default_data, num_rows="dynamic", use_container_width=True)
+        a = cronbach_alpha(edited)
+        w = mcdonald_omega_approx(edited)
+        col1, col2 = st.columns(2)
+        with col1:
+            stat_card("Cronbach's α", f"{a:.3f}" if a is not None else "—",
+                      interpret_alpha(a))
+        with col2:
+            stat_card("McDonald's ω (approx.)", f"{w:.3f}" if w is not None else "—",
+                      "single-factor PCA approximation")
+
+    with tabs[1]:
+        st.markdown("#### Cohen's d — two independent groups")
+        rng = np.random.default_rng(1)
+        g1 = st.text_area("Group A", "4, 5, 3, 4, 5, 4, 3, 5", height=80)
+        g2 = st.text_area("Group B", "3, 3, 4, 2, 3, 4, 3, 2", height=80)
+        try:
+            a_vals = [float(x) for x in g1.replace(",", " ").split()]
+            b_vals = [float(x) for x in g2.replace(",", " ").split()]
+            d = cohens_d(a_vals, b_vals)
+            if d is not None:
+                stat_card("Cohen's d", f"{d:.3f}", interpret_d(d))
+            else:
+                st.warning("Not enough data to compute d.")
+        except ValueError:
+            st.error("Please enter comma- or space-separated numbers.")
+
+    with tabs[2]:
+        st.markdown("#### Krippendorff's α (nominal)")
+        st.markdown("Enter codings — rows = units, columns = coders. Blank = missing.")
+        default_coding = pd.DataFrame({
+            "Coder1": [1, 0, 1, 1, 0, 1],
+            "Coder2": [1, 0, 0, 1, 0, 1],
+        })
+        coding = st.data_editor(default_coding, num_rows="dynamic", use_container_width=True)
+        arr = coding.replace("", np.nan).astype(float).values
+        alpha = krippendorff_alpha_nominal(arr)
+        stat_card("Krippendorff's α", f"{alpha:.3f}" if alpha is not None else "—",
+                  "target ≥ 0.75")
+
+    with tabs[3]:
+        st.markdown("#### Pearson correlation")
+        rng = np.random.default_rng(2)
+        x = rng.normal(0, 1, 50)
+        y = 0.5 * x + rng.normal(0, 1, 50)
+        r, p = stats.pearsonr(x, y)
+        stat_card("r", f"{r:.3f}", f"p = {p:.4g}  ·  N = 50 (simulated)")
+
+    with tabs[4]:
+        st.markdown("#### Power curve for a chosen d")
+        d_choice = st.slider("Cohen's d", 0.10, 1.00, 0.30, 0.05, key="lab_power")
+        ns = np.arange(20, 400, 20)
+        curve = power_curve(d_choice, ns)
+        fig = px.line(curve, x="n_per_arm", y="power")
+        fig.add_hline(y=0.80, line_dash="dash", line_color=BRAND["amber"])
+        fig.update_layout(xaxis_title="n per arm", yaxis_title="power",
+                          yaxis_range=[0, 1.02])
+        st.plotly_chart(style_plotly(fig, 340), use_container_width=True)
+
+
+def render_results() -> None:
+    st.title("Results — Reporting Template")
+    info_box(
+        "No real data have been collected at the time of this prototype. "
+        "The layout below is the pre-registered reporting template. Every field "
+        "marked '—' is intentional: the platform refuses to display empirical "
+        "results without actual data."
+    )
+
+    st.markdown("### Study status")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        stat_card("Participants", "—", "No real data yet")
+    with col2:
+        stat_card("Survey completion", "—", "No real data yet")
+    with col3:
+        stat_card("Intervention effect", "—", "Requires control arm data")
+
+    st.divider()
+    st.markdown("### What will be reported per outcome")
+    st.markdown(
+        "| Outcome | Instrument | Primary analysis | Effect size | 95% CI | p-value | Missing |\n"
+        "|---|---|---|---|---|---|---|\n"
+        "| Anticipated stigma | PSOSH | ANCOVA (T1 ~ arm + T0) | Cohen's d (adjusted) | yes | yes | yes |\n"
+        "| Social distance | RIBS | ANCOVA (T1 ~ arm + T0) | Cohen's d | yes | yes | yes |\n"
+        "| Help-seeking attitude | MHSAS | ANCOVA (T1 ~ arm + T0) | Cohen's d | yes | yes | yes |\n"
+        "| Stigma attitudes | ATMHPS-AZ | ANCOVA (T1 ~ arm + T0) | Cohen's d | yes | yes | yes |"
+    )
+
+    st.divider()
+    st.markdown("### Reporting rules (mandatory)")
+    danger_box(
+        "1. Never report p-values without N, effect size, and 95% CI.<br>"
+        "2. Never interpret a cross-sectional correlation as causal.<br>"
+        "3. Never report an intervention effect without a control arm.<br>"
+        "4. Never hide missing data or drop non-completers silently.<br>"
+        "5. Never run exploratory factor analysis on n < 100.<br>"
+        "6. Never treat a preprint finding as peer-reviewed evidence."
+    )
+
+    st.divider()
+    st.markdown("### Expected output artifacts")
+    st.markdown(
+        "- `analysis_summary.csv` — one row per outcome, columns: N, effect, 95% CI, p\n"
+        "- `figures/forest_plot.png` — forest plot of primary and secondary outcomes\n"
+        "- `figures/reliability.png` — reliability comparison per instrument\n"
+        "- `research_report.json` — machine-readable, versioned research report"
+    )
+
+
+def render_evidence() -> None:
+    st.title("Evidence Library")
+
+    st.markdown(
+        "The 10 priority references that anchor the methodology. "
+        "Preprints and peer-reviewed sources are distinguished."
+    )
+
+    for ref in REFERENCES:
         st.markdown(
-            """
-            - **Target Length:** 6–7 minutes.
-            - **Structure:**
-              1. *Opening:* Everyday quiet and unspoken strain around stress and expectations.
-              2. *Context:* How stigma and media framing shape whether young people speak up.
-              3. *Perspective:* Lived voices, domain context, and constructive pathways toward support.
-            - **Ethical Safeguard:** Informed consent, anonymized identities where needed, and non-sensational framing.
-            """
-        )
-
-    with t2:
-        st.markdown("### 3-Part Podcast Blueprint")
-        pod_df = pd.DataFrame(
-            [
-                {"Episode": "Episode 01", "Focus": "Stigma & Media Framing", "Core Idea": "How cultural scripts and media stories shape perceived shame or openness."},
-                {"Episode": "Episode 02", "Focus": "Silence & Non-Disclosure", "Core Idea": "Why people hold back in conversations and how attentive listening matters."},
-                {"Episode": "Episode 03", "Focus": "Help-Seeking & Support", "Core Idea": "Clear, stigma-aware steps for reaching out and supporting peers."},
-            ]
-        )
-        st.dataframe(pod_df, use_container_width=True, hide_index=True)
-
-    with t3:
-        st.markdown("### Interactive Campaign Brief Generator")
-        pillar = st.selectbox(
-            "Select communication pillar",
-            [
-                "Normalize Early Help-Seeking",
-                "Counter Stigma Without Sensationalism",
-                "Encourage Attentive Listening",
-            ],
-        )
-        audience = st.selectbox(
-            "Primary audience segment",
-            ["University Students & Young Adults", "Educators & Campus Communities", "General Public Readers"],
-        )
-        st.markdown(
-            f"""
-            <div class="teal-card">
-                <div class="kicker">CAMPAIGN BRIEF · {audience.upper()}</div>
-                <h4>Pillar: {pillar}</h4>
-                <p><strong>Key Message:</strong> Seeking guidance or talking openly about distress is a constructive human response, not a personal failing.</p>
-                <p><strong>Planned Assets:</strong> 1 campaign key visual, 6 short-form social media stories/reels, and a clear local support resource list.</p>
-            </div>
-            """,
+            f'<div class="ref-card">'
+            f'<span class="num">{ref["n"]}</span>'
+            f'<span class="title">{ref["title"]}</span>'
+            f'<div class="authors">{ref["authors"]} ({ref["year"]})</div>'
+            f'<div class="meta">{ref["meta"]}</div>'
+            f'<div style="margin-top:0.7rem; font-size:0.9rem; color:#333; line-height:1.55;">'
+            f'<strong>Key finding:</strong> {ref["key_finding"]}</div>'
+            f'<span class="role">Role: {ref["role"]}</span> &nbsp; {evidence_badge(ref["level"])}'
+            f'</div>',
             unsafe_allow_html=True,
         )
 
-# =====================================================================
-# 13. SECTION 07 — IMPACT (PRE / POST AUDIENCE EVALUATION)
-# =====================================================================
-
-elif page == "07 · Impact":
-    st.markdown('<div class="kicker">AUDIENCE EVALUATION</div>', unsafe_allow_html=True)
-    st.header("Impact Measurement: Pre- and Post-Engagement Check")
-    st.markdown(
-        "Use this module to record **actual pre- and post-exposure survey or "
-        "pilot responses** from your audience. No synthetic audience scores are generated."
-    )
-
-    c_pre, c_post = st.columns(2)
-    with c_pre:
-        st.markdown("#### Pre-Exposure Mean / Selected Rating (1–7)")
-        pre_stigma = st.slider("Perceived stigma around talking about mental health (1 = Low, 7 = High)", 1, 7, 5, key="pre_s")
-        pre_comfort = st.slider("Comfort discussing help-seeking options (1 = Low, 7 = High)", 1, 7, 3, key="pre_c")
-
-    with c_post:
-        st.markdown("#### Post-Exposure Mean / Selected Rating (1–7)")
-        post_stigma = st.slider("Perceived stigma after media exposure (1 = Low, 7 = High)", 1, 7, 3, key="post_s")
-        post_comfort = st.slider("Comfort discussing help-seeking options after exposure (1 = Low, 7 = High)", 1, 7, 5, key="post_c")
-
-    stigma_diff = post_stigma - pre_stigma
-    comfort_diff = post_comfort - pre_comfort
-
-    m1, m2 = st.columns(2)
-    m1.metric("Perceived Stigma Delta (Post − Pre)", f"{stigma_diff:+d}", "Negative indicates lower rating")
-    m2.metric("Support Comfort Delta (Post − Pre)", f"{comfort_diff:+d}", "Positive indicates higher rating")
-
-    chart_df = pd.DataFrame(
-        {"Pre": [pre_stigma, pre_comfort], "Post": [post_stigma, post_comfort]},
-        index=["Perceived Stigma", "Support Comfort"],
-    )
-    st.bar_chart(chart_df, use_container_width=True)
-
     st.caption(
-        "For formal evaluation, collect paired pre/post responses across a defined "
-        "pilot sample and report sample size (n), dispersion, and potential selection bias."
+        "Preprints are explicitly marked. Presence in this library does not "
+        "imply endorsement by a peer-reviewed outlet. Verify each reference "
+        "independently before using it in a submission."
     )
 
-# =====================================================================
-# 14. SECTION 08 — ABOUT, ETHICS & METHODOLOGICAL GUARDRAILS
-# =====================================================================
 
-elif page == "08 · About & Ethics":
-    st.markdown('<div class="kicker">ETHICS, GOVERNANCE & LIMITATIONS</div>', unsafe_allow_html=True)
-    st.header("About, Ethics & Methodological Guardrails")
+def render_ethics() -> None:
+    st.title("Ethics & Methodology")
+
+    st.markdown("### What this project does")
+    success_box(
+        "• Uses validated instruments with published psychometrics<br>"
+        "• Reports N, effect size, and 95% CI for every empirical claim<br>"
+        "• Uses informed consent and anonymity for every participant<br>"
+        "• Keeps data collection to the minimum required for the research question<br>"
+        "• Labels all synthetic data as SYNTHETIC everywhere it appears<br>"
+        "• Distinguishes preprints from peer-reviewed evidence"
+    )
+
+    st.markdown("### What this project does not do")
+    danger_box(
+        "• Does not diagnose any individual<br>"
+        "• Does not display personal risk scores to participants<br>"
+        "• Does not include PHQ-8 or any clinical screener in its core<br>"
+        "• Does not fabricate indices such as 'silence_index'<br>"
+        "• Does not present cross-sectional correlations as causal findings<br>"
+        "• Does not claim intervention effects without a control arm<br>"
+        "• Does not collect suicide-risk information without a formal safety protocol"
+    )
+
+    st.divider()
+    st.markdown("### Data protection")
+    st.markdown(
+        "- Data are stored on encrypted servers, access-limited to named researchers.\n"
+        "- Identifiable data (names, emails, phone) are not collected in the survey wave.\n"
+        "- Interview transcripts are de-identified; identifiable details are removed.\n"
+        "- Composite narratives are labeled `composite` — never presented as verbatim accounts.\n"
+        "- Analysis scripts and data dictionaries are versioned."
+    )
+
+    st.divider()
+    st.markdown("### Limitations (pre-registered)")
+    st.markdown(
+        "1. Pilot sample sizes are small; early-phase findings will be descriptive.\n"
+        "2. Control arm is not matched on all covariates; ANCOVA-adjusted estimates.\n"
+        "3. Media sample is limited to a defined set of outlets; not representative of all Azerbaijani media.\n"
+        "4. Four-week follow-up captures short-term change only; long-term effects not measured.\n"
+        "5. Cross-cultural validity of the instruments in the Azerbaijani context is documented but still evolving."
+    )
+
+    st.divider()
+    st.markdown("### Versioning")
+    st.markdown(
+        f"- Platform version: **1.0** (scientific edition)\n"
+        f"- Last updated: **{datetime.now().strftime('%d %b %Y')}**\n"
+        "- Repository: see README in the project root\n"
+        "- Pre-registration: template available in `/preregistration/`"
+    )
+
+    st.divider()
+    st.markdown("### Contact")
+    st.markdown(
+        "📧 `research@neurometricgaze.example`  \n"
+        "🔗 `github.com/your-handle/neurometric-gaze`  \n"
+        "📍 Baku, Azerbaijan"
+    )
+
+
+# =============================================================================
+# 10. SIDEBAR AND ROUTER
+# =============================================================================
+
+with st.sidebar:
     st.markdown(
         """
-        - **Non-Clinical Boundary:** This prototype is strictly for research, education, and media communication. It does not diagnose, screen, or assign individual clinical risk.
-        - **No Fabricated Metrics:** Every statistic shown in the Research Lab is computed directly from supplied data or explicitly marked as not available when required columns/samples are absent.
-        - **Informed Consent & Privacy:** Any interviews, surveys, or community testing require clear informed consent, data minimization, and de-identification/anonymization prior to analysis or sharing.
-        - **Support Resources:** If you or someone you know needs support, please consult a qualified mental health professional or local support service.
-        """
+        <div style="padding: 0.5rem 0 1.5rem 0;">
+            <div style="color:#D6A56C; font-size:0.68rem; letter-spacing:0.25em; font-weight:600;">
+                THE NEUROMETRIC GAZE
+            </div>
+            <div style="color:#F5F2EB; font-family:'Playfair Display',serif; font-size:1.05rem; margin-top:0.4rem;">
+                Beyond the Unheard
+            </div>
+            <div style="color:rgba(245,242,235,0.55); font-size:0.72rem; margin-top:0.2rem;">
+                Research prototype · v1.0
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
+    st.markdown("---")
+
+    page = st.radio(
+        "Navigation",
+        [
+            "🏠 Home",
+            "❓ Research Question",
+            "📰 Module A — Media Analysis",
+            "📋 Module B — Youth Survey",
+            "🎬 Module C — Intervention",
+            "🧮 Statistical Analysis Lab",
+            "📊 Results (Template)",
+            "📚 Evidence Library",
+            "⚖️ Ethics & Methodology",
+        ],
+        label_visibility="collapsed",
+    )
+
+    st.markdown("---")
+    st.markdown(
+        f"""
+        <div style="font-size:0.7rem; color:rgba(245,242,235,0.65); line-height:1.7;">
+            <strong style="color:#D6A56C;">Status:</strong> Prototype<br>
+            <strong style="color:#D6A56C;">Empirical data:</strong> None yet<br>
+            <strong style="color:#D6A56C;">Updated:</strong> {datetime.now().strftime('%d %b %Y')}<br>
+            <strong style="color:#D6A56C;">License:</strong> CC-BY-NC-4.0
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+if page == "🏠 Home":
+    render_home()
+elif page == "❓ Research Question":
+    render_research_question()
+elif page == "📰 Module A — Media Analysis":
+    render_media_analysis()
+elif page == "📋 Module B — Youth Survey":
+    render_survey()
+elif page == "🎬 Module C — Intervention":
+    render_intervention()
+elif page == "🧮 Statistical Analysis Lab":
+    render_stats_lab()
+elif page == "📊 Results (Template)":
+    render_results()
+elif page == "📚 Evidence Library":
+    render_evidence()
+elif page == "⚖️ Ethics & Methodology":
+    render_ethics()
