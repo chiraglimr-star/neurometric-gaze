@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import re
-import warnings
 import zipfile
 from typing import Any
 
@@ -12,31 +10,13 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from sklearn.dummy import DummyClassifier
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import (
-    accuracy_score,
-    average_precision_score,
-    balanced_accuracy_score,
-    brier_score_loss,
-    classification_report,
-    confusion_matrix,
-    f1_score,
-    roc_auc_score,
-)
-from sklearn.model_selection import StratifiedKFold, cross_val_predict
-from sklearn.pipeline import FeatureUnion, Pipeline
-
-warnings.filterwarnings("ignore", category=FutureWarning)
-
 # ---------------------------------------------------------------------
-# APP CONFIGURATION
+# PAGE CONFIGURATION & EDITORIAL DESIGN SYSTEM
 # ---------------------------------------------------------------------
 
 st.set_page_config(
-    page_title="The Neurometric Gaze",
-    page_icon="◉",
+    page_title="The Neurometric Gaze — Beyond the Unheard",
+    page_icon="◈",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -44,738 +24,603 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    .stApp { background: #0b1020; }
+    @import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600;700&display=swap');
+
+    .stApp {
+        background-color: #F5F2EB;
+        color: #14243A;
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
     .block-container {
         padding-top: 2rem;
-        padding-bottom: 3rem;
-        max-width: 1320px;
+        padding-bottom: 3.5rem;
+        max-width: 1240px;
     }
-    h1, h2, h3 { letter-spacing: -0.45px; }
+    h1, h2, h3 {
+        font-family: 'Instrument Serif', Georgia, serif;
+        color: #14243A;
+        letter-spacing: -0.3px;
+    }
+    h1 {
+        font-size: 3.1rem;
+        line-height: 1.08;
+        font-weight: 400;
+    }
+    h2 {
+        font-size: 2.05rem;
+        line-height: 1.15;
+        margin-top: 0.4rem;
+    }
+    p, li, label, .stCaption {
+        color: #1F324D;
+    }
+    [data-testid="stSidebar"] {
+        background-color: #ECE7DC;
+        border-right: 1px solid rgba(20, 36, 58, 0.12);
+    }
     div[data-testid="stMetric"] {
-        background: rgba(255,255,255,0.045);
-        border: 1px solid rgba(255,255,255,0.09);
-        padding: 16px;
-        border-radius: 13px;
+        background-color: #FFFFFF;
+        border: 1px solid rgba(20, 36, 58, 0.12);
+        border-top: 3px solid #5C8581;
+        padding: 16px 18px;
+        border-radius: 10px;
     }
-    div[data-testid="stAlert"] { border-radius: 10px; }
+    div[data-testid="stMetric"] label {
+        color: #4A5E78 !important;
+    }
+    div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+        color: #14243A !important;
+        font-weight: 600;
+    }
+    .editorial-kicker {
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+        font-size: 0.78rem;
+        font-weight: 600;
+        color: #5C8581;
+        margin-bottom: 0.4rem;
+    }
+    .editorial-card {
+        background-color: #FFFFFF;
+        border: 1px solid rgba(20, 36, 58, 0.12);
+        border-left: 4px solid #D6A56C;
+        border-radius: 10px;
+        padding: 1.25rem 1.4rem;
+        margin-bottom: 1rem;
+    }
+    .quote-box {
+        background-color: #EFECE4;
+        border-left: 4px solid #14243A;
+        padding: 1rem 1.25rem;
+        border-radius: 0 8px 8px 0;
+        font-style: italic;
+        color: #14243A;
+        margin: 0.8rem 0;
+    }
+    .pill-tag {
+        display: inline-block;
+        background-color: rgba(92, 133, 129, 0.14);
+        color: #14243A;
+        border: 1px solid rgba(92, 133, 129, 0.35);
+        padding: 0.2rem 0.65rem;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        font-weight: 500;
+        margin-right: 0.4rem;
+        margin-bottom: 0.4rem;
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-st.title("◉ The Neurometric Gaze")
-st.subheader("Clinical Silence Analyzer")
-st.caption(
-    "An exploratory computational humanities research prototype "
-    "examining language patterns in interview narratives alongside "
-    "self-reported psychological distress measures."
-)
-
-st.warning(
-    "Research use only — not a diagnostic or screening instrument. "
-    "PHQ-8 scores are self-reported symptom measures, not clinical diagnoses. "
-    "Language patterns cannot establish a person's actual emotional state. "
-    "Never use these results to make decisions about an individual."
-)
-
-with st.expander("Research scope, ethics and methodological limitations"):
-    st.markdown(
-        """
-        **Research question:** Are linguistic characteristics in interview
-        narratives associated with self-reported PHQ-8 measures?
-
-        **Interpretation boundaries**
-        - PHQ-8 is a self-report symptom measure, not a clinical diagnosis.
-        - Lexical patterns are not direct measurements of emotions or mental states.
-        - Transcript text alone cannot measure acoustic silence, pauses, prosody,
-          facial expression or gaze.
-        - DAIC-WOZ interviews use a virtual interviewer and are not equivalent
-          to ordinary doctor–patient consultations.
-        - Internal cross-validation is not external validation.
-        - Predictive association does not establish causality.
-        - Performance on one dataset does not establish generalizability to
-          another population, language, culture or setting.
-
-        **Ethical position:** Use only data for which you have appropriate
-        authorization. Follow the dataset's licence, consent conditions,
-        institutional ethics requirements and data-protection rules. Avoid
-        exposing participant-level predictions or identifiable text.
-        """
-    )
-
 # ---------------------------------------------------------------------
-# SAMPLE / HELPER FUNCTIONS
+# CURATED RESEARCH & MEDIA DATA (ILLUSTRATIVE / RESEARCH STRUCTURE)
 # ---------------------------------------------------------------------
 
-def get_sample_dataframe() -> pd.DataFrame:
-    """Synthetic placeholder rows for instant interface testing."""
-    rows = [
-        ("S01", "I usually keep things to myself during appointments and just nod along.", 1, 15),
-        ("S02", "Sometimes it is hard to explain what I am feeling so I stay quiet.", 1, 13),
-        ("S03", "I do not want to sound dramatic so I downplay my symptoms.", 1, 12),
-        ("S04", "I pause a lot before answering personal questions about my mood.", 1, 14),
-        ("S05", "I tell the doctor directly when something bothers me or feels off.", 0, 3),
-        ("S06", "Sleep has been steady and I feel comfortable talking openly.", 0, 2),
-        ("S07", "I keep a daily routine and share clear updates during check-ins.", 0, 4),
-        ("S08", "Overall my energy is normal and I rarely hold back concerns.", 0, 5),
-        ("S09", "I often feel tired but brush it off instead of bringing it up.", 1, 16),
-        ("S10", "I feel hesitant to speak openly even when asked directly.", 1, 11),
-        ("S11", "My mood feels balanced and I have no trouble describing my week.", 0, 3),
-        ("S12", "I communicate clearly and feel heard in conversations.", 0, 2),
+STORIES = [
+    {
+        "id": "story_01",
+        "title": "The Quiet Waiting Room",
+        "context": "Young adult · Urban clinic visit · Anonymized composite narrative",
+        "theme": "Silence & Stigma",
+        "silence_index": 78,
+        "quote": "I came in for persistent exhaustion and sleeplessness, yet when asked how I was coping, I said 'just busy with work' and waited for the prescription.",
+        "narrative": (
+            "During a ten-minute consultation, clinical questions focused quickly on physical checklists. "
+            "Emotional strain and social pressure to appear strong remained unspoken. In narrative terms, "
+            "silence functioned not as an absence of feeling, but as a protective strategy against judgment."
+        ),
+        "audio_note": "Podcast Episode 02 excerpt (03:18) — Voices of Hesitation: Why young adults edit their distress before speaking.",
+        "reflection": "What shifts in a clinical or public conversation when silence is treated as a signal worth asking about rather than a blank space?",
+    },
+    {
+        "id": "story_02",
+        "title": "Labels That Travel Faster Than Care",
+        "context": "University student · Family & media framing · Anonymized narrative",
+        "theme": "Social Stigma",
+        "silence_index": 66,
+        "quote": "In everyday conversation, seeking counseling is still whispered about as 'weakness' or 'a serious flaw,' even by people who care deeply.",
+        "narrative": (
+            "Media headlines and casual remarks often swing between sensationalism and dismissive clichés. "
+            "Young people navigating academic and family expectations describe hesitating to name anxiety or burnout "
+            "out of concern for reputation and misunderstanding."
+        ),
+        "audio_note": "Podcast Episode 01 excerpt (04:05) — Beyond the Label: How cultural narratives shape stigma in Azerbaijan.",
+        "reflection": "How do everyday metaphors around mental health shape whether someone reaches out early or waits until distress becomes acute?",
+    },
+    {
+        "id": "story_03",
+        "title": "Finding Words Without Clinical Jargon",
+        "context": "Early-career professional · Help-seeking journey · Anonymized narrative",
+        "theme": "Help-Seeking",
+        "silence_index": 44,
+        "quote": "I didn't know how to explain what I was going through until I heard someone else describe burnout in plain, human language.",
+        "narrative": (
+            "Accessible storytelling and relatable lived accounts helped bridge the gap between vague discomfort "
+            "and constructive help-seeking. Clear, non-stigmatizing information made asking for support feel "
+            "ordinary rather than intimidating."
+        ),
+        "audio_note": "Podcast Episode 03 excerpt (02:54) — Opening the Door: Practical, human pathways to care and support.",
+        "reflection": "Which formats—short documentary stories, peer conversations, or clear guides—best lower barriers to help-seeking?",
+    },
+]
+
+EVIDENCE_ITEMS = [
+    {
+        "claim": "Self-stigma and fear of social judgment are major barriers to mental health help-seeking among young adults.",
+        "domain": "Stigma & Help-Seeking",
+        "source": "Clement et al. (2015) / Thornicroft et al. — Systematic review literature on mental health-related stigma",
+        "evidence_level": "Systematic Review / Conceptual Evidence",
+        "status": "Verified Research Theme",
+    },
+    {
+        "claim": "Attention to patients' stories, silences, and lived context strengthens clinical understanding and empathic engagement.",
+        "domain": "Narrative Medicine",
+        "source": "Charon, R. (2006) — Narrative Medicine: Honoring the Stories of Illness",
+        "evidence_level": "Foundational Clinical Humanities Framework",
+        "status": "Core Theoretical Anchor",
+    },
+    {
+        "claim": "Framing mental health through human stories and stigma-aware communication improves public comprehension compared with fear- or blame-heavy framing.",
+        "domain": "Health & Media Communication",
+        "source": "WHO / Public Health & Media Framing Literature on Stigma Reduction",
+        "evidence_level": "Public Health Communication Synthesis",
+        "status": "Intervention Basis",
+    },
+    {
+        "claim": "Text transcripts alone cannot measure acoustic pauses, tone, facial expression, or clinical diagnosis, and require strict ethical guardrails.",
+        "domain": "Computational & Ethical Scope",
+        "source": "Project Methodological & Ethics Protocol (Neurometric Gaze)",
+        "evidence_level": "Methodological Boundary",
+        "status": "Mandatory Guardrail",
+    },
+]
+
+SAMPLE_NARRATIVES = pd.DataFrame(
+    [
+        {"participant_id": "N01", "theme": "Silence & Stigma", "text": "I stayed quiet during the visit because I did not want to sound weak or dramatic.", "distress_flag": 1, "phq8_score": 14},
+        {"participant_id": "N02", "theme": "Social Stigma", "text": "People around me treat therapy as something shameful so I hide how stressed I feel.", "distress_flag": 1, "phq8_score": 15},
+        {"participant_id": "N03", "theme": "Help-Seeking", "text": "Talking openly with a counselor helped me put my stress into words and sleep better.", "distress_flag": 0, "phq8_score": 4},
+        {"participant_id": "N04", "theme": "Silence & Stigma", "text": "I kept everything inside and just said I was fine when asked how things were going.", "distress_flag": 1, "phq8_score": 13},
+        {"participant_id": "N05", "theme": "Help-Seeking", "text": "I shared my concerns clearly and felt supported by clear, practical guidance.", "distress_flag": 0, "phq8_score": 3},
+        {"participant_id": "N06", "theme": "Social Stigma", "text": "Media stories often exaggerate or mock mental struggles instead of explaining them.", "distress_flag": 1, "phq8_score": 12},
     ]
-    return pd.DataFrame(
-        rows, columns=["participant_id", "text", "phq8_binary", "phq8_score"]
-    )
+)
 
 
-def clean_text(value: Any) -> str:
-    if value is None:
+def clean_text(val: Any) -> str:
+    if val is None:
         return ""
     try:
-        if pd.isna(value):
+        if pd.isna(val):
             return ""
     except (TypeError, ValueError):
         pass
-    return re.sub(r"\s+", " ", str(value)).strip()
+    return re.sub(r"\s+", " ", str(val)).strip()
 
 
-def normalize_column(name: Any) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", str(name).strip().lower()).strip("_")
-
-
-def locate_column(columns, alternatives):
-    mapping = {normalize_column(col): col for col in columns}
-    for alternative in alternatives:
-        key = normalize_column(alternative)
-        if key in mapping:
-            return mapping[key]
-    return None
-
-
-def read_csv_bytes(raw: bytes, filename: str = "data.csv") -> pd.DataFrame:
-    errors = []
-    for encoding in ("utf-8", "utf-8-sig", "latin-1"):
-        try:
-            return pd.read_csv(io.BytesIO(raw), encoding=encoding)
-        except Exception as exc:
-            errors.append(f"{encoding}: {exc}")
-    raise ValueError(f"Could not read {filename} as CSV. " + " | ".join(errors[-2:]))
-
-
-def normalize_dataset(df: pd.DataFrame) -> pd.DataFrame:
-    id_col = locate_column(
-        df.columns,
-        ["participant_id", "participant", "subject_id", "subject", "id"],
-    )
-    text_col = locate_column(
-        df.columns,
-        ["text", "transcript", "utterance", "narrative", "speech"],
-    )
-    label_col = locate_column(
-        df.columns,
-        ["phq8_binary", "phq_8_binary", "phq8binary", "label", "target"],
-    )
-    score_col = locate_column(
-        df.columns,
-        ["phq8_score", "phq_8_score", "phq8", "phq_8", "total_score"],
-    )
-    split_col = locate_column(
-        df.columns,
-        ["split", "set", "partition", "subset"],
-    )
-
-    if text_col is None:
-        raise ValueError(
-            "Text column not found. Expected text, transcript or narrative."
-        )
-    if label_col is None:
-        raise ValueError(
-            "PHQ-8 binary label not found. Expected phq8_binary, phq_8_binary, label or target."
-        )
-
-    result = pd.DataFrame(index=df.index)
-    if id_col is not None:
-        ids = df[id_col].map(clean_text)
-        result["participant_id"] = [
-            val if val else f"participant_{i}" for i, val in enumerate(ids)
-        ]
-    else:
-        result["participant_id"] = [f"participant_{i}" for i in range(len(df))]
-
-    result["text"] = df[text_col].map(clean_text)
-    result["phq8_binary"] = pd.to_numeric(df[label_col], errors="coerce")
-    result["phq8_score"] = (
-        pd.to_numeric(df[score_col], errors="coerce")
-        if score_col is not None
-        else np.nan
-    )
-    result["split"] = (
-        df[split_col].map(clean_text).str.lower() if split_col is not None else ""
-    )
-    return result.reset_index(drop=True)
-
-
-def parse_transcript_csv(raw: bytes, filename: str) -> dict:
-    frame = read_csv_bytes(raw, filename)
-    speaker_col = locate_column(frame.columns, ["speaker", "role", "speaker_id"])
-    text_col = locate_column(frame.columns, ["value", "text", "utterance", "transcript"])
-
-    if text_col is None:
-        raise ValueError(f"No transcript text column in {filename}")
-
-    if speaker_col is not None:
-        speakers = frame[speaker_col].map(clean_text).str.lower()
-        participant_mask = speakers.str.contains(
-            r"participant|patient|subject|participant_id",
-            regex=True,
-            na=False,
-        )
-        participant_rows = frame.loc[participant_mask, text_col]
-        if participant_rows.empty:
-            raise ValueError(f"Could not identify participant speech in {filename}.")
-        text_values = participant_rows
-    else:
-        text_values = frame[text_col]
-
-    transcript = " ".join(cleaned for item in text_values if (cleaned := clean_text(item)))
-    match = re.search(r"(\d+)", filename)
-    participant_id = match.group(1) if match else filename
-
-    if not transcript:
-        raise ValueError(f"Transcript is empty: {filename}")
-
-    return {"participant_id": str(participant_id), "text": transcript}
-
-
-def parse_daic_zip(raw: bytes) -> pd.DataFrame:
-    transcripts = []
-    metadata_frames = []
-
-    try:
-        archive = zipfile.ZipFile(io.BytesIO(raw))
-    except zipfile.BadZipFile as exc:
-        raise ValueError("The uploaded ZIP file is invalid or corrupted.") from exc
-
-    with archive:
-        for member in archive.namelist():
-            if member.endswith("/") or "__MACOSX" in member:
+def extract_zip_transcripts(raw: bytes) -> pd.DataFrame:
+    records = []
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        for name in zf.namelist():
+            if name.endswith("/") or "__MACOSX" in name:
                 continue
-            base = member.rsplit("/", 1)[-1]
+            base = name.rsplit("/", 1)[-1]
             if not base.lower().endswith(".csv"):
                 continue
-
-            content = archive.read(member)
-            if "transcript" in base.lower():
-                try:
-                    transcripts.append(parse_transcript_csv(content, base))
-                except Exception:
-                    continue
-            else:
-                try:
-                    metadata_frames.append(read_csv_bytes(content, base))
-                except Exception:
-                    continue
-
-    if not transcripts:
-        raise ValueError(
-            "No readable participant transcript CSV files were found in the ZIP archive."
-        )
-
-    result = pd.DataFrame(transcripts)
-    metadata_found = False
-
-    for metadata in metadata_frames:
-        id_col = locate_column(
-            metadata.columns, ["participant_id", "participant", "subject_id", "id"]
-        )
-        label_col = locate_column(
-            metadata.columns, ["phq8_binary", "phq_8_binary", "phq8binary"]
-        )
-        if id_col is None or label_col is None:
-            continue
-
-        meta = pd.DataFrame()
-        raw_ids = metadata[id_col].map(clean_text)
-        extracted = raw_ids.str.extract(r"(\d+)", expand=False)
-        meta["participant_id"] = extracted.where(extracted.notna(), raw_ids)
-        meta["phq8_binary"] = pd.to_numeric(metadata[label_col], errors="coerce")
-
-        score_col = locate_column(
-            metadata.columns, ["phq8_score", "phq_8_score", "phq8", "phq_8"]
-        )
-        split_col = locate_column(
-            metadata.columns, ["split", "partition", "set", "subset"]
-        )
-
-        meta["phq8_score"] = (
-            pd.to_numeric(metadata[score_col], errors="coerce")
-            if score_col is not None
-            else np.nan
-        )
-        meta["split"] = (
-            metadata[split_col].map(clean_text).str.lower()
-            if split_col is not None
-            else ""
-        )
-
-        meta = meta.drop_duplicates(subset=["participant_id"], keep="first")
-        result = result.merge(
-            meta[["participant_id", "phq8_binary", "phq8_score", "split"]],
-            on="participant_id",
-            how="left",
-            validate="many_to_one",
-        )
-        metadata_found = True
-        break
-
-    if not metadata_found:
-        result["phq8_binary"] = np.nan
-        result["phq8_score"] = np.nan
-        result["split"] = ""
-
-    return result
-
-
-def aggregate_participants(frame: pd.DataFrame) -> pd.DataFrame:
-    required = {"participant_id", "text", "phq8_binary"}
-    missing = required.difference(frame.columns)
-    if missing:
-        raise ValueError("Missing required columns: " + ", ".join(sorted(missing)))
-
-    work = frame.copy()
-    if "phq8_score" not in work.columns:
-        work["phq8_score"] = np.nan
-    if "split" not in work.columns:
-        work["split"] = ""
-
-    rows = []
-    for participant_id, group in work.groupby("participant_id", dropna=False, sort=False):
-        texts = [clean_text(value) for value in group["text"]]
-        joined_text = " ".join(value for value in texts if value)
-
-        labels = pd.to_numeric(group["phq8_binary"], errors="coerce").dropna().unique()
-        label = labels[0] if len(labels) == 1 else np.nan
-
-        scores = pd.to_numeric(group["phq8_score"], errors="coerce").dropna().unique()
-        score = scores[0] if len(scores) == 1 else np.nan
-
-        split_values = (
-            group["split"].map(clean_text).str.lower().replace("", np.nan).dropna().unique()
-        )
-        split = split_values[0] if len(split_values) == 1 else ""
-
-        rows.append(
-            {
-                "participant_id": str(participant_id),
-                "text": joined_text,
-                "phq8_binary": label,
-                "phq8_score": score,
-                "split": split,
-            }
-        )
-
-    result = pd.DataFrame(rows)
-    if result.empty:
-        raise ValueError("No participant records were produced.")
-
-    result["token_count"] = result["text"].map(
-        lambda value: len(re.findall(r"\b[\w'-]+\b", value))
-    )
-    return result
-
-
-def prepare_eligible_data(raw_frame: pd.DataFrame, minimum_tokens: int):
-    participant_data = aggregate_participants(raw_frame)
-    participant_data["phq8_binary"] = pd.to_numeric(
-        participant_data["phq8_binary"], errors="coerce"
-    )
-
-    eligible = participant_data[
-        participant_data["phq8_binary"].isin([0, 1])
-        & participant_data["text"].str.len().gt(0)
-        & participant_data["token_count"].ge(minimum_tokens)
-    ].copy()
-
-    if not eligible.empty:
-        eligible["phq8_binary"] = eligible["phq8_binary"].astype(int)
-
-    return participant_data, eligible.reset_index(drop=True)
-
-
-# ---------------------------------------------------------------------
-# MODELING & EVALUATION
-# ---------------------------------------------------------------------
-
-def build_model() -> Pipeline:
-    word_features = TfidfVectorizer(
-        analyzer="word",
-        ngram_range=(1, 2),
-        min_df=1,
-        max_features=15000,
-        sublinear_tf=True,
-        strip_accents="unicode",
-    )
-    character_features = TfidfVectorizer(
-        analyzer="char",
-        ngram_range=(3, 5),
-        min_df=1,
-        max_features=15000,
-        sublinear_tf=True,
-    )
-    combined_features = FeatureUnion(
-        [("word", word_features), ("character", character_features)]
-    )
-    classifier = LogisticRegression(
-        max_iter=2000,
-        class_weight="balanced",
-        solver="liblinear",
-        random_state=42,
-    )
-    return Pipeline([("features", combined_features), ("classifier", classifier)])
-
-
-def safe_auc(y_true, probabilities) -> float:
-    try:
-        if len(np.unique(y_true)) < 2:
-            return float("nan")
-        return float(roc_auc_score(y_true, probabilities))
-    except Exception:
-        return float("nan")
-
-
-def bootstrap_auc_ci(y_true, probabilities, repetitions: int = 500, seed: int = 42):
-    y = np.asarray(y_true)
-    probs = np.asarray(probabilities)
-    if len(y) < 4:
-        return float("nan"), float("nan")
-
-    rng = np.random.default_rng(seed)
-    values = []
-    for _ in range(repetitions):
-        indices = rng.integers(0, len(y), size=len(y))
-        sampled_y = y[indices]
-        if len(np.unique(sampled_y)) < 2:
-            continue
-        values.append(roc_auc_score(sampled_y, probs[indices]))
-
-    if len(values) < 30:
-        return float("nan"), float("nan")
-
-    low, high = np.quantile(values, [0.025, 0.975])
-    return float(low), float(high)
-
-
-def evaluate_model(data: pd.DataFrame):
-    X = data["text"].astype(str).to_numpy()
-    y = data["phq8_binary"].astype(int).to_numpy()
-
-    counts = pd.Series(y).value_counts()
-    if len(counts) != 2:
-        raise ValueError("Both PHQ-8 binary classes (0 and 1) are required.")
-    if int(counts.min()) < 2:
-        raise ValueError(
-            "At least two participants in each class are required for cross-validation."
-        )
-
-    folds = min(5, int(counts.min()))
-    cv = StratifiedKFold(n_splits=folds, shuffle=True, random_state=42)
-
-    model = build_model()
-    probabilities = cross_val_predict(
-        model, X, y, cv=cv, method="predict_proba", n_jobs=None
-    )[:, 1]
-    predictions = (probabilities >= 0.5).astype(int)
-
-    baseline = DummyClassifier(strategy="prior")
-    baseline_predictions = cross_val_predict(
-        baseline, X.reshape(-1, 1), y, cv=cv, method="predict"
-    )
-
-    auc_low, auc_high = bootstrap_auc_ci(y, probabilities)
-
-    metrics = {
-        "Participants": int(len(y)),
-        "Cross-validation folds": int(folds),
-        "Accuracy": float(accuracy_score(y, predictions)),
-        "Balanced accuracy": float(balanced_accuracy_score(y, predictions)),
-        "Macro F1": float(f1_score(y, predictions, average="macro", zero_division=0)),
-        "ROC AUC": safe_auc(y, probabilities),
-        "PR AUC": float(average_precision_score(y, probabilities)),
-        "Brier score": float(brier_score_loss(y, probabilities)),
-        "Baseline accuracy": float(accuracy_score(y, baseline_predictions)),
-        "Baseline macro F1": float(
-            f1_score(y, baseline_predictions, average="macro", zero_division=0)
-        ),
-        "ROC AUC 95% CI lower": auc_low,
-        "ROC AUC 95% CI upper": auc_high,
-    }
-
-    matrix = confusion_matrix(y, predictions, labels=[0, 1])
-    report = classification_report(
-        y, predictions, labels=[0, 1], output_dict=True, zero_division=0
-    )
-    prediction_table = pd.DataFrame(
-        {
-            "participant_id": data["participant_id"].values,
-            "actual_label": y,
-            "predicted_probability": probabilities,
-            "predicted_label": predictions,
-        }
-    )
-    return metrics, matrix, report, prediction_table
-
-
-def json_safe(value):
-    if value is None:
-        return None
-    try:
-        if pd.isna(value):
-            return None
-    except (TypeError, ValueError):
-        pass
-    if isinstance(value, (np.integer,)):
-        return int(value)
-    if isinstance(value, (np.floating,)):
-        return float(value)
-    if isinstance(value, (np.bool_,)):
-        return bool(value)
-    return value
-
-
-def make_research_record(data, metrics):
-    return {
-        "project": "The Neurometric Gaze",
-        "analysis": "Participant-level stratified cross-validation",
-        "participants": int(len(data)),
-        "class_counts": {
-            str(k): int(v) for k, v in data["phq8_binary"].value_counts().items()
-        },
-        "metrics": {k: json_safe(v) for k, v in metrics.items()},
-        "limitations": [
-            "Research prototype, not a diagnostic or screening instrument.",
-            "PHQ-8 is a self-reported symptom measure, not a diagnosis.",
-            "Cross-validation is internal evaluation.",
-            "No external validation or clinical utility has been established.",
-            "Transcript text cannot measure acoustic silence, gaze or emotion.",
-            "Predictive associations do not establish causality.",
-        ],
-    }
-
-
-# ---------------------------------------------------------------------
-# SIDEBAR
-# ---------------------------------------------------------------------
-
-st.sidebar.title("Research workspace")
-uploaded_file = st.sidebar.file_uploader(
-    "Upload dataset",
-    type=["csv", "zip"],
-    help="CSV requires text/transcript and phq8_binary.",
-)
-
-use_sample = st.sidebar.checkbox(
-    "Use built-in synthetic sample dataset",
-    value=(uploaded_file is None),
-    help="Loads synthetic placeholder examples when no file is uploaded.",
-)
-
-minimum_tokens = st.sidebar.slider(
-    "Minimum participant token count",
-    min_value=0,
-    max_value=500,
-    value=5,
-    step=5,
-)
-
-with st.sidebar.expander("CSV format"):
-    st.code(
-        "participant_id,text,phq8_binary,phq8_score\n"
-        'P001,"Example participant narrative",0,4\n'
-        'P002,"Another participant narrative",1,14',
-        language="csv",
-    )
-
-# ---------------------------------------------------------------------
-# MAIN FLOW
-# ---------------------------------------------------------------------
-
-if uploaded_file is None and not use_sample:
-    st.info("Upload a CSV/ZIP file or enable the synthetic sample dataset in the sidebar.")
-    st.stop()
-
-try:
-    if uploaded_file is not None:
-        raw_bytes = uploaded_file.getvalue()
-        source_tag = hashlib.sha256(raw_bytes).hexdigest()
-        if uploaded_file.name.lower().endswith(".zip"):
-            raw_data = parse_daic_zip(raw_bytes)
-            if raw_data["phq8_binary"].notna().sum() == 0:
-                st.error(
-                    "Transcript files were found, but matching PHQ-8 metadata was not found."
-                )
-                st.stop()
-        else:
-            source_frame = read_csv_bytes(raw_bytes, uploaded_file.name)
-            raw_data = normalize_dataset(source_frame)
-    else:
-        raw_data = get_sample_dataframe()
-        source_tag = "synthetic_sample_v1"
-        st.caption("Showing built-in synthetic sample dataset for demonstration.")
-
-    participant_data, data = prepare_eligible_data(raw_data, minimum_tokens)
-
-    analysis_key = f"{source_tag}:{minimum_tokens}"
-    if st.session_state.get("analysis_key") != analysis_key:
-        st.session_state["analysis_key"] = analysis_key
-        st.session_state.pop("model_results", None)
-
-    if data.empty:
-        st.error("No eligible participant records remain after filtering.")
-        st.stop()
-
-    st.header("01 — Dataset overview")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Eligible participants", f"{len(data):,}")
-    m2.metric("Class 0", f"{int((data.phq8_binary == 0).sum()):,}")
-    m3.metric("Class 1", f"{int((data.phq8_binary == 1).sum()):,}")
-    m4.metric("Median tokens", f"{data.token_count.median():.0f}")
-
-    st.header("02 — Data quality audit")
-    audit = pd.DataFrame(
-        {
-            "Measure": [
-                "Uploaded / sample rows",
-                "Unique participant IDs",
-                "Eligible labelled participants",
-                "Participants with missing/conflicting labels",
-                "Participants with empty text",
-                "Participants below token threshold",
-            ],
-            "Value": [
-                len(raw_data),
-                raw_data["participant_id"].nunique(),
-                len(data),
-                int(participant_data["phq8_binary"].isna().sum())
-                + int(
-                    (
-                        raw_data.groupby("participant_id")["phq8_binary"]
-                        .nunique(dropna=True)
-                        .gt(1)
-                    ).sum()
-                ),
-                int(participant_data["text"].map(lambda v: len(clean_text(v)) == 0).sum()),
-                int((participant_data["token_count"] < minimum_tokens).sum()),
-            ],
-        }
-    )
-    st.dataframe(audit, use_container_width=True, hide_index=True)
-
-    st.header("03 — Descriptive analysis")
-    descriptive = (
-        data.groupby("phq8_binary")
-        .agg(
-            Participants=("participant_id", "count"),
-            Mean_tokens=("token_count", "mean"),
-            Median_tokens=("token_count", "median"),
-            SD_tokens=("token_count", "std"),
-        )
-        .reset_index()
-    )
-    st.dataframe(descriptive, use_container_width=True, hide_index=True)
-
-    left, right = st.columns(2)
-    with left:
-        st.markdown("#### Participant distribution")
-        dist = (
-            data["phq8_binary"]
-            .value_counts()
-            .sort_index()
-            .rename_axis("PHQ-8 binary category")
-            .reset_index(name="Participants")
-        )
-        st.bar_chart(dist.set_index("PHQ-8 binary category"), use_container_width=True)
-
-    with right:
-        st.markdown("#### Participant token-count distribution")
-        st.bar_chart(data.set_index("participant_id")[["token_count"]], use_container_width=True)
-
-    st.header("04 — Computational text analysis")
-    if st.button("Run full evaluation", type="primary", use_container_width=True):
-        with st.spinner("Evaluating model..."):
             try:
-                st.session_state["model_results"] = evaluate_model(data)
-                st.success("Evaluation completed.")
-            except Exception as model_error:
-                st.session_state.pop("model_results", None)
-                st.error(f"Evaluation error: {model_error}")
+                df_sub = pd.read_csv(io.BytesIO(zf.read(name)))
+            except Exception:
+                continue
+            text_col = next(
+                (c for c in df_sub.columns if c.lower() in {"text", "transcript", "utterance", "value", "narrative"}),
+                None,
+            )
+            if text_col is None:
+                continue
+            if "speaker" in [c.lower() for c in df_sub.columns]:
+                sp_col = next(c for c in df_sub.columns if c.lower() == "speaker")
+                mask = df_sub[sp_col].astype(str).str.lower().str.contains("participant|patient|subject", regex=True, na=False)
+                rows = df_sub.loc[mask, text_col] if mask.any() else df_sub[text_col]
+            else:
+                rows = df_sub[text_col]
+            joined = " ".join(clean_text(x) for x in rows if clean_text(x))
+            if joined:
+                pid_match = re.search(r"(\d+)", base)
+                pid = pid_match.group(1) if pid_match else base
+                records.append({"participant_id": pid, "theme": "Uploaded Transcript", "text": joined, "distress_flag": np.nan, "phq8_score": np.nan})
+    if not records:
+        raise ValueError("No readable CSV transcripts found inside the ZIP archive.")
+    return pd.DataFrame(records)
 
-    if "model_results" in st.session_state:
-        metrics, matrix, report, prediction_table = st.session_state["model_results"]
 
-        st.subheader("Model performance")
-        metric_frame = pd.DataFrame(
-            {
-                "Metric": list(metrics.keys()),
-                "Value": [
-                    "—"
-                    if pd.isna(v)
-                    else f"{v:.4f}"
-                    if isinstance(v, float)
-                    else str(v)
-                    for v in metrics.values()
-                ],
-            }
+# ---------------------------------------------------------------------
+# SIDEBAR NAVIGATION (8 CORE SECTIONS)
+# ---------------------------------------------------------------------
+
+st.sidebar.markdown('<div class="editorial-kicker">The Neurometric Gaze</div>', unsafe_allow_html=True)
+st.sidebar.markdown("### Beyond the Unheard")
+st.sidebar.caption("Research · Evidence · Human Stories · Media Intervention")
+
+section = st.sidebar.radio(
+    "Navigate platform",
+    [
+        "01 · Home",
+        "02 · The Problem",
+        "03 · Human Stories",
+        "04 · Research Lab",
+        "05 · Evidence Library",
+        "06 · The Intervention",
+        "07 · Impact",
+        "08 · About & Ethics",
+    ],
+)
+
+st.sidebar.markdown("---")
+st.sidebar.caption(
+    "Prototype for Harvard MS-MMH portfolio exploration. "
+    "Not a medical or diagnostic tool."
+)
+
+# ---------------------------------------------------------------------
+# 01 · HOME
+# ---------------------------------------------------------------------
+
+if section == "01 · Home":
+    st.markdown('<div class="editorial-kicker">STORIES · EVIDENCE · UNDERSTANDING · ACTION</div>', unsafe_allow_html=True)
+    st.title("Beyond the Unheard")
+    st.markdown(
+        "### Understanding mental health narratives, stigma, and help-seeking through research and human-centered media"
+    )
+    st.markdown(
+        "Mental health is not only a clinical category—it is also shaped by what people feel able to say, "
+        "what remains unspoken, and how media and culture frame distress. This platform brings together "
+        "**human stories**, **research evidence**, and **media intervention** with a focus on young adults in Azerbaijan."
+    )
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown(
+            """
+            <div class="editorial-card">
+                <div class="editorial-kicker">01 · Human Stories</div>
+                <h4>Lived Experiences</h4>
+                <p>Anonymized narratives exploring how people talk about distress, stay silent, navigate stigma, and seek support.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
-        st.dataframe(metric_frame, use_container_width=True, hide_index=True)
-
-        st.subheader("Confusion matrix")
-        st.dataframe(
-            pd.DataFrame(
-                matrix, index=["Actual 0", "Actual 1"], columns=["Predicted 0", "Predicted 1"]
-            ),
-            use_container_width=True,
+    with c2:
+        st.markdown(
+            """
+            <div class="editorial-card">
+                <div class="editorial-kicker">02 · Research & Evidence</div>
+                <h4>Empirical & Media Analysis</h4>
+                <p>Structured examination of media framing, communication barriers, thematic patterns, and verified literature.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with c3:
+        st.markdown(
+            """
+            <div class="editorial-card">
+                <div class="editorial-kicker">03 · Media Intervention</div>
+                <h4>Public Health Storytelling</h4>
+                <p>Short documentary, 3-part podcast series, interactive narratives, and stigma-aware public communication.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
-        st.subheader("Classification report")
-        st.dataframe(
-            pd.DataFrame(report).T.reset_index().rename(columns={"index": "Class / metric"}),
-            use_container_width=True,
-            hide_index=True,
+    st.info(
+        "**Core Research Question:** How do media narratives shape young adults' understanding of mental health stigma and help-seeking in Azerbaijan?"
+    )
+
+# ---------------------------------------------------------------------
+# 02 · THE PROBLEM
+# ---------------------------------------------------------------------
+
+elif section == "02 · The Problem":
+    st.markdown('<div class="editorial-kicker">CONTEXT & STIGMA</div>', unsafe_allow_html=True)
+    st.header("The Problem: Silence, Stigma, and Fragmented Narratives")
+    st.markdown(
+        "Across many communities, conversations around psychological distress are constrained by social stigma, "
+        "fear of misjudgment, and narrow media portrayals. When public narratives treat emotional struggle as taboo "
+        "or purely sensational, young adults often delay seeking support or edit out key experiences during conversations."
+    )
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Primary Lens", "Narrative & Stigma", "Social medicine framing")
+    m2.metric("Target Audience", "Young Adults", "Azerbaijan context")
+    m3.metric("Core Output", "Media + Research", "Evidence-backed intervention")
+
+    st.markdown("### Key Communication Friction Points")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown(
+            """
+            <div class="editorial-card">
+                <h4>Cultural & Social Hesitation</h4>
+                <p>Concern over family expectations, social reputation, or being labeled 'weak' can turn everyday stress into private silence.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col_b:
+        st.markdown(
+            """
+            <div class="editorial-card">
+                <h4>Media & Information Gaps</h4>
+                <p>Fragmented or stigmatizing media coverage rarely models constructive, empathetic, and realistic help-seeking pathways.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
-        st.subheader("Out-of-fold predictions")
-        st.dataframe(prediction_table, use_container_width=True, hide_index=True)
+# ---------------------------------------------------------------------
+# 03 · HUMAN STORIES
+# ---------------------------------------------------------------------
 
-        st.download_button(
-            "Download predictions CSV",
-            prediction_table.to_csv(index=False).encode("utf-8"),
-            file_name="neurometric_predictions.csv",
-            mime="text/csv",
+elif section == "03 · Human Stories":
+    st.markdown('<div class="editorial-kicker">INTERACTIVE STORYTELLING</div>', unsafe_allow_html=True)
+    st.header("Human Stories: What Remains Unheard")
+    st.markdown(
+        "Explore anonymized, composite narratives illustrating how silence, social stigma, and supportive communication appear in everyday life."
+    )
+
+    selected_title = st.selectbox(
+        "Select a story to read and inspect",
+        [s["title"] for s in STORIES],
+    )
+    story = next(s for s in STORIES if s["title"] == selected_title)
+
+    st.markdown(
+        f"""
+        <div class="editorial-card">
+            <span class="pill-tag">{story["theme"]}</span>
+            <span class="pill-tag">{story["context"]}</span>
+            <h3>{story["title"]}</h3>
+            <div class="quote-box">“{story["quote"]}”</div>
+            <p>{story["narrative"]}</p>
+            <p><strong>Audio & Documentary Cue:</strong> {story["audio_note"]}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("#### Reader Reflection Prompt")
+    st.write(story["reflection"])
+
+# ---------------------------------------------------------------------
+# 04 · RESEARCH LAB
+# ---------------------------------------------------------------------
+
+elif section == "04 · Research Lab":
+    st.markdown('<div class="editorial-kicker">RESEARCH ANALYTICS & THEMATIC CODING</div>', unsafe_allow_html=True)
+    st.header("Research Lab: Narrative Patterns & Data Exploration")
+    st.markdown(
+        "Inspect thematic patterns and word frequencies across anonymized narrative notes or upload your own authorized CSV / ZIP dataset."
+    )
+
+    uploaded = st.file_uploader("Upload CSV or ZIP transcript archive (optional)", type=["csv", "zip"])
+
+    if uploaded is not None:
+        raw_bytes = uploaded.getvalue()
+        if uploaded.name.lower().endswith(".zip"):
+            df_lab = extract_zip_transcripts(raw_bytes)
+        else:
+            df_lab = pd.read_csv(io.BytesIO(raw_bytes))
+            text_col = next(
+                (c for c in df_lab.columns if c.lower() in {"text", "transcript", "narrative", "utterance"}),
+                None,
+            )
+            if text_col is None:
+                st.error("CSV must contain a text, transcript, narrative, or utterance column.")
+                st.stop()
+            df_lab = df_lab.copy()
+            df_lab["text"] = df_lab[text_col].map(clean_text)
+            if "theme" not in df_lab.columns:
+                df_lab["theme"] = "Uploaded Narrative"
+            if "participant_id" not in df_lab.columns:
+                df_lab["participant_id"] = [f"P{i+1:02d}" for i in range(len(df_lab))]
+    else:
+        df_lab = SAMPLE_NARRATIVES.copy()
+        st.caption("Showing illustrative research notes. Upload your own authorized dataset above to explore custom texts.")
+
+    df_lab["word_count"] = df_lab["text"].astype(str).apply(lambda t: len(re.findall(r"\b\w+\b", t)))
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Records Analyzed", f"{len(df_lab)}")
+    c2.metric("Mean Word Count", f"{df_lab['word_count'].mean():.1f}")
+    c3.metric("Themes Represented", f"{df_lab['theme'].nunique()}")
+
+    st.markdown("#### Thematic & Text Table")
+    st.dataframe(df_lab, use_container_width=True, hide_index=True)
+
+    # Simple transparent keyword/theme frequency inspection
+    tokens = re.findall(r"\b[a-zA-ZəğıöşüçƏĞIİÖŞÜÇ]{4,}\b", " ".join(df_lab["text"].astype(str)).lower())
+    stopwords = {"that", "this", "with", "from", "have", "were", "what", "when", "they", "them", "into", "about", "just", "some", "more", "than", "because", "would", "could", "said", "asked"}
+    freq = pd.Series([w for w in tokens if w not in stopwords]).value_counts().head(12)
+
+    if not freq.empty:
+        st.markdown("#### Top Non-Stopword Terms (Descriptive Word Frequency)")
+        st.bar_chart(freq, use_container_width=True)
+
+    with st.expander("Optional Secondary Module: Exploratory PHQ-8 Text Association (Non-Clinical)"):
+        st.caption(
+            "Kept as a secondary methodological module only. PHQ-8 is a self-report symptom scale, "
+            "not a clinical diagnosis, and lexical patterns do not measure emotions or individual risk."
+        )
+        if "phq8_score" in df_lab.columns and df_lab["phq8_score"].notna().sum() >= 3:
+            sub = df_lab[["word_count", "phq8_score"]].dropna()
+            if len(sub) >= 3 and sub["phq8_score"].nunique() > 1:
+                corr = sub.corr(method="spearman").iloc[0, 1]
+                st.metric("Exploratory Spearman Correlation (Word Count vs PHQ-8)", f"{corr:.3f}")
+        else:
+            st.write("Include a numeric `phq8_score` column (at least 3 valid rows) to inspect descriptive correlation.")
+
+# ---------------------------------------------------------------------
+# 05 · EVIDENCE LIBRARY
+# ---------------------------------------------------------------------
+
+elif section == "05 · Evidence Library":
+    st.markdown('<div class="editorial-kicker">SOURCE VERIFICATION & LITERATURE</div>', unsafe_allow_html=True)
+    st.header("Evidence Library")
+    st.markdown(
+        "Every core claim in the project is paired with its literature anchor, evidence type, and analytical boundary."
+    )
+
+    domain_filter = st.selectbox(
+        "Filter by research domain",
+        ["All"] + sorted({item["domain"] for item in EVIDENCE_ITEMS}),
+    )
+
+    filtered_evidence = (
+        EVIDENCE_ITEMS
+        if domain_filter == "All"
+        else [item for item in EVIDENCE_ITEMS if item["domain"] == domain_filter]
+    )
+
+    for item in filtered_evidence:
+        st.markdown(
+            f"""
+            <div class="editorial-card">
+                <span class="pill-tag">{item["domain"]}</span>
+                <span class="pill-tag">{item["evidence_level"]}</span>
+                <span class="pill-tag">{item["status"]}</span>
+                <h4>{item["claim"]}</h4>
+                <p><strong>Reference / Basis:</strong> {item["source"]}</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
-        record = make_research_record(data, metrics)
-        st.download_button(
-            "Download research record JSON",
-            json.dumps(record, indent=2).encode("utf-8"),
-            file_name="neurometric_research_record.json",
-            mime="application/json",
+# ---------------------------------------------------------------------
+# 06 · THE INTERVENTION
+# ---------------------------------------------------------------------
+
+elif section == "06 · The Intervention":
+    st.markdown('<div class="editorial-kicker">CAMPAIGN STUDIO & MEDIA FORMATS</div>', unsafe_allow_html=True)
+    st.header("The Intervention: Documentary, Podcast & Public Campaign")
+    st.markdown(
+        "Rather than presenting raw findings alone, the intervention translates research themes into accessible media formats designed to reduce stigma and encourage constructive help-seeking."
+    )
+
+    tab1, tab2, tab3 = st.tabs(["Short Documentary (5–8 min)", "3-Episode Podcast Series", "Public Awareness Campaign"])
+
+    with tab1:
+        st.markdown("### Documentary Concept: *Voices Behind the Pause*")
+        st.write("- **Runtime:** 6–7 minutes · **Format:** Observational storytelling, expert commentary, and archival/editorial visuals.")
+        st.write("- **Arc:** Opens with everyday silence around stress, examines stigma and media framing, and closes with human pathways toward support.")
+
+    with tab2:
+        st.markdown("### 3-Part Podcast Blueprint")
+        st.write("1. **Episode 1 — Naming the Unspoken:** How cultural scripts and media language shape stigma.")
+        st.write("2. **Episode 2 — Silence in the Room:** Why young adults hold back—and how attentive listening changes dialogue.")
+        st.write("3. **Episode 3 — Moving Toward Support:** Practical, stigma-free steps for reaching out and supporting peers.")
+
+    with tab3:
+        st.markdown("### Awareness Campaign Asset Planner")
+        topic_choice = st.selectbox(
+            "Choose a campaign pillar",
+            ["Normalize Asking for Help", "Challenge Stigma Without Blame", "Listen Beyond Quick Answers"],
+        )
+        st.markdown(
+            f"""
+            <div class="editorial-card">
+                <div class="editorial-kicker">Campaign Brief · {topic_choice}</div>
+                <p><strong>Core Message:</strong> Seeking support or talking openly about strain is a practical step toward wellbeing, not a personal failure.</p>
+                <p><strong>Deliverables:</strong> 6 short social media visuals/reels, 1 key campaign poster, and a shareable resource card with local support pathways.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
-    st.header("05 — Research integrity checklist")
-    checklist = [
-        "Verify participant IDs against official metadata.",
-        "Verify PHQ-8 labels against the original source.",
-        "Document missing-data and exclusion decisions.",
-        "Keep the official test set untouched when applicable.",
-        "Compare the model against simple baselines.",
-        "Report uncertainty and class-specific performance.",
-        "Conduct independent human annotation using a written codebook.",
-        "Calculate inter-rater reliability only from actual independent annotations.",
-        "Do not interpret lexical associations as actual emotions.",
-        "Respect dataset licensing, consent and ethics requirements.",
-    ]
-    for idx, item in enumerate(checklist):
-        st.checkbox(item, key=f"check_{idx}")
+# ---------------------------------------------------------------------
+# 07 · IMPACT
+# ---------------------------------------------------------------------
 
-except Exception as error:
-    st.error(f"Application processing error: {error}")
+elif section == "07 · Impact":
+    st.markdown('<div class="editorial-kicker">PRE / POST EVALUATION</div>', unsafe_allow_html=True)
+    st.header("Impact Measurement: Pre- and Post-Intervention Check")
+    st.markdown(
+        "Measure how exposure to a story or media piece shifts perceived stigma and willingness to seek or recommend support."
+    )
+
+    col_pre, col_post = st.columns(2)
+    with col_pre:
+        st.markdown("#### Before Viewing / Listening (Pre)")
+        pre_stigma = st.slider("Perceived stigma around talking about mental health (1 = Low, 7 = High)", 1, 7, 5)
+        pre_help = st.slider("Comfort discussing support options openly (1 = Low, 7 = High)", 1, 7, 3)
+
+    with col_post:
+        st.markdown("#### After Viewing / Listening (Post)")
+        post_stigma = st.slider("Perceived stigma after media engagement (1 = Low, 7 = High)", 1, 7, 3)
+        post_help = st.slider("Comfort discussing support options after engagement (1 = Low, 7 = High)", 1, 7, 5)
+
+    stigma_delta = post_stigma - pre_stigma
+    help_delta = post_help - pre_help
+
+    m1, m2 = st.columns(2)
+    m1.metric("Stigma Score Change", f"{stigma_delta:+d} pts", "Negative = lower stigma")
+    m2.metric("Support Comfort Change", f"{help_delta:+d} pts", "Positive = higher comfort")
+
+    impact_df = pd.DataFrame(
+        {
+            "Pre-Intervention": [pre_stigma, pre_help],
+            "Post-Intervention": [post_stigma, post_help],
+        },
+        index=["Stigma Perception", "Support Comfort"],
+    )
+    st.bar_chart(impact_df, use_container_width=True)
+
+    summary_payload = {
+        "project": "The Neurometric Gaze — Beyond the Unheard",
+        "pre": {"stigma": pre_stigma, "support_comfort": pre_help},
+        "post": {"stigma": post_stigma, "support_comfort": post_help},
+        "deltas": {"stigma_change": stigma_delta, "support_comfort_change": help_delta},
+    }
+    st.download_button(
+        "Export Impact Snapshot (JSON)",
+        json.dumps(summary_payload, indent=2).encode("utf-8"),
+        file_name="neurometric_gaze_impact_snapshot.json",
+        mime="application/json",
+    )
+
+# ---------------------------------------------------------------------
+# 08 · ABOUT & ETHICS
+# ---------------------------------------------------------------------
+
+elif section == "08 · About & Ethics":
+    st.markdown('<div class="editorial-kicker">GOVERNANCE, CONSENT & LIMITATIONS</div>', unsafe_allow_html=True)
+    st.header("About, Methodology & Ethical Guardrails")
+    st.markdown(
+        """
+        - **Not a clinical or diagnostic tool:** This prototype supports research, storytelling, and public communication—never medical diagnosis, screening, or individual risk scoring.
+        - **Informed consent & anonymization:** Any real interviews or audience responses require explicit consent, clear purpose disclosure, and anonymization prior to analysis or publication.
+        - **Methodological transparency:** Text and media analysis capture narratives and perceptions; they do not establish clinical causality or replace professional care.
+        - **Support notice:** If you or someone you know is going through a difficult time, please reach out to a qualified healthcare professional or local support service.
+        """
+    )
